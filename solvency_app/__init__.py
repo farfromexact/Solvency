@@ -1,0 +1,2 @@
+"""Solvency scenario analysis application."""
+
