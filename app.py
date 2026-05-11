@@ -213,6 +213,7 @@ def _render_detail_tabs(data, result) -> None:
     with tabs[2]:
         st.dataframe(_display_rate_df(result.risk_rates), use_container_width=True, hide_index=True)
     with tabs[3]:
+        st.warning("当前底稿 KBQS_V 的“利率风险暴露”字段为 0；债券/存款利率风险应改用 IN01/MC_RESULT 口径，当前版本暂未纳入精确利率风险重算。")
         st.dataframe(_display_money_df(result.exposure_summary), use_container_width=True, hide_index=True)
     with tabs[4]:
         st.dataframe(_display_money_df(data.account_capital), use_container_width=True, hide_index=True)
@@ -231,10 +232,10 @@ def _format_metric_comparison(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _display_money_df(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    out = _dedupe_columns(df.copy())
     for col in out.columns:
         if pd.api.types.is_numeric_dtype(out[col]):
-            if "率" in str(col):
+            if _is_ratio_column(str(col)):
                 out[col] = out[col].map(_fmt_pct)
             else:
                 out[col] = out[col].map(_fmt_money)
@@ -246,6 +247,26 @@ def _display_rate_df(df: pd.DataFrame) -> pd.DataFrame:
     if "单位资本率" in df.columns:
         out["单位资本率"] = df["单位资本率"].map(_fmt_pct)
     return out
+
+
+def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    seen: dict[str, int] = {}
+    columns = []
+    for col in df.columns:
+        name = str(col)
+        count = seen.get(name, 0)
+        if count:
+            columns.append(f"{name}_{count + 1}")
+        else:
+            columns.append(name)
+        seen[name] = count + 1
+    df.columns = columns
+    return df
+
+
+def _is_ratio_column(column_name: str) -> bool:
+    ratio_names = ("变化率", "单位资本率", "核心偿付能力充足率", "综合偿付能力充足率")
+    return any(name in column_name for name in ratio_names)
 
 
 def _fmt_money(value: float) -> str:
