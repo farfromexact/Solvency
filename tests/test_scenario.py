@@ -62,6 +62,27 @@ def test_account_level_adjustment_stays_account_scoped(workbook_data):
     assert value_delta > 0
 
 
+def test_interest_risk_exposure_is_enriched_from_mc_result(workbook_data):
+    assert workbook_data.kbqs["利率风险暴露"].sum() > 0
+
+
+def test_local_government_bond_increase_changes_minimum_capital(workbook_data):
+    result = run_scenario(
+        workbook_data,
+        [
+            Adjustment(
+                dimension="资产类型",
+                member="地方政府债",
+                change_pct=0.0,
+                mode="position",
+                change_amount=1_000_000_000.0,
+            )
+        ],
+    )
+    assert result.scenario["最低资本"] > result.baseline["最低资本"]
+    assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
+
+
 def test_position_amount_adjustment_changes_minimum_capital(workbook_data):
     equity_rows = workbook_data.kbqs[workbook_data.kbqs["权益价格风险暴露"] > 0]
     asset_member = str(equity_rows.iloc[0]["资产类型"])

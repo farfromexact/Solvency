@@ -14,6 +14,10 @@ SHEET_PREFIXES = {
     "fls05acc": "FLS05ACC_",
 }
 
+OPTIONAL_SHEET_PREFIXES = {
+    "mc_result": "MC_RESULT_",
+}
+
 EXPOSURE_COLUMNS = [
     "认可价值",
     "利率风险暴露",
@@ -62,6 +66,11 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
     s01 = _read_report_sheet(excel, sheets["s01"])
     s05 = _read_report_sheet(excel, sheets["s05"])
     kbqs = _read_kbqs_sheet(excel, sheets["kbqs"])
+    optional_sheets = _resolve_optional_sheets(excel.sheet_names)
+    if "mc_result" in optional_sheets:
+        kbqs = _enrich_interest_risk_from_mc_result(
+            kbqs, _read_mc_result_sheet(excel, optional_sheets["mc_result"])
+        )
     account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
     source_name = getattr(source, "name", None) or str(source)
@@ -89,6 +98,15 @@ def _resolve_sheets(sheet_names: list[str]) -> dict[str, str]:
         raise WorkbookValidationError(
             "工作簿缺少必要 sheet: " + ", ".join(missing)
         )
+    return resolved
+
+
+def _resolve_optional_sheets(sheet_names: list[str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for key, prefix in OPTIONAL_SHEET_PREFIXES.items():
+        match = next((name for name in sheet_names if name.startswith(prefix)), None)
+        if match is not None:
+            resolved[key] = match
     return resolved
 
 
@@ -123,6 +141,60 @@ def _read_kbqs_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     for col in EXPOSURE_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     return df
+
+
+def _read_mc_result_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(excel, sheet_name=sheet_name, header=1)
+    required = {"账户", "资产类型", "账面价值净价", "应收利息", "资产端利率风险MC"}
+    missing = required.difference(df.columns)
+    if missing:
+        return pd.DataFrame()
+    keep = ["账户", "资产类型", "账面价值净价", "应收利息", "资产端利率风险MC"]
+    df = df[keep].copy()
+    df["账户"] = df["账户"].fillna("未分类账户").astype(str).str.strip()
+    df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
+    for col in ["账面价值净价", "应收利息", "资产端利率风险MC"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["利率风险资产价值"] = df["账面价值净价"] + df["应收利息"]
+    return df
+
+
+def _enrich_interest_risk_from_mc_result(kbqs: pd.DataFrame, mc_result: pd.DataFrame) -> pd.DataFrame:
+    if mc_result.empty:
+        return kbqs
+
+    enriched = kbqs.copy()
+    by_account_asset = (
+        mc_result.groupby(["账户", "资产类型"], dropna=False)[["利率风险资产价值", "资产端利率风险MC"]]
+        .sum()
+        .reset_index()
+    )
+    by_account_asset["账户资产利率风险率"] = _safe_series_div(
+        by_account_asset["资产端利率风险MC"], by_account_asset["利率风险资产价值"]
+    )
+
+    by_asset = (
+        mc_result.groupby("资产类型", dropna=False)[["利率风险资产价值", "资产端利率风险MC"]]
+        .sum()
+        .reset_index()
+    )
+    by_asset["资产类型利率风险率"] = _safe_series_div(
+        by_asset["资产端利率风险MC"], by_asset["利率风险资产价值"]
+    )
+
+    enriched = enriched.merge(
+        by_account_asset[["账户", "资产类型", "账户资产利率风险率"]],
+        on=["账户", "资产类型"],
+        how="left",
+    ).merge(
+        by_asset[["资产类型", "资产类型利率风险率"]],
+        on="资产类型",
+        how="left",
+    )
+
+    rate = enriched["账户资产利率风险率"].fillna(enriched["资产类型利率风险率"]).fillna(0.0)
+    enriched["利率风险暴露"] = enriched["认可价值"] * rate
+    return enriched.drop(columns=["账户资产利率风险率", "资产类型利率风险率"])
 
 
 def _read_account_capital_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
@@ -189,3 +261,8 @@ def _safe_div(numerator: float, denominator: float) -> float:
     if denominator == 0:
         return 0.0
     return numerator / denominator
+
+
+def _safe_series_div(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    denominator = denominator.replace(0, pd.NA)
+    return (numerator / denominator).fillna(0.0)
