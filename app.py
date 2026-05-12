@@ -69,7 +69,7 @@ def _render_scenario_controls(data) -> list[Adjustment]:
     adjustments: list[Adjustment] = []
 
     with position_tab:
-        st.caption("用于模拟买入、卖出、建仓或减仓。按选中资产类型/账户现有结构同比调整风险暴露。")
+        st.caption("用于模拟买入、卖出、建仓或减仓。按选中资产类型现有结构同比调整风险暴露；债券类资产可选择久期 bucket。")
         adjustments.extend(_render_adjustment_rows(data, mode_name="position", key_prefix="position"))
 
     with price_tab:
@@ -77,20 +77,14 @@ def _render_scenario_controls(data) -> list[Adjustment]:
         adjustments.extend(_render_adjustment_rows(data, mode_name="price", key_prefix="price"))
 
     with base_tab:
-        mode = st.radio("查看维度", ["资产类型", "账户"], horizontal=True, key="base_dimension")
-        summary = build_asset_summary(data.kbqs, mode)
+        summary = build_asset_summary(data.kbqs, "资产类型")
         st.dataframe(_display_money_df(summary), use_container_width=True, height=360)
 
     return adjustments
 
 
 def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjustment]:
-    dimension = st.radio(
-        "调整维度",
-        ["资产类型", "账户"],
-        horizontal=True,
-        key=f"{key_prefix}_dimension",
-    )
+    dimension = "资产类型"
     summary = build_asset_summary(data.kbqs, dimension)
     options = summary[dimension].astype(str).tolist()
     count = st.number_input(
@@ -110,14 +104,26 @@ def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjus
     )
     adjustments: list[Adjustment] = []
     for idx in range(int(count)):
-        cols = st.columns([3, 1.2, 1.2])
+        cols = st.columns([3, 1.3, 1.2, 1.2])
         member = cols[0].selectbox(
             f"对象 {idx + 1}",
             options,
             key=f"{key_prefix}_member_{dimension}_{idx}",
         )
+        duration_bucket = "存量平均"
+        duration_options = _duration_options(data, member)
+        if duration_options:
+            duration_bucket = cols[1].selectbox(
+                "债券久期",
+                duration_options,
+                key=f"{key_prefix}_duration_{dimension}_{idx}",
+                help="来自 MC_RESULT_资产端利率风险明细表；选择后用该资产类型在对应久期 bucket 的利率风险抵减因子。",
+            )
+            input_col = cols[2]
+        else:
+            input_col = cols[1]
         if input_mode == "比例":
-            pct = cols[1].number_input(
+            pct = input_col.number_input(
                 "变化比例%",
                 min_value=-100.0,
                 max_value=500.0,
@@ -127,7 +133,7 @@ def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjus
             )
             amount = 0.0
         else:
-            amount_wan = cols[1].number_input(
+            amount_wan = input_col.number_input(
                 "变化金额(万元)",
                 min_value=-10_000_000.0,
                 max_value=10_000_000.0,
@@ -138,7 +144,7 @@ def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjus
             amount = float(amount_wan) * 10000.0
             pct = 0.0
         current_value = float(summary.loc[summary[dimension].astype(str) == member, "认可价值"].sum())
-        cols[2].metric("当前认可价值", _fmt_money(current_value))
+        cols[3].metric("当前认可价值", _fmt_money(current_value))
         adjustments.append(
             Adjustment(
                 dimension=dimension,
@@ -146,9 +152,22 @@ def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjus
                 change_pct=float(pct),
                 mode=mode_name,
                 change_amount=float(amount),
+                duration_bucket=duration_bucket,
             )
         )
     return adjustments
+
+
+def _duration_options(data, asset_type: str) -> list[str]:
+    table = getattr(data, "interest_factor_table", pd.DataFrame())
+    if table.empty:
+        return []
+    scoped = table[table["资产类型"].astype(str) == str(asset_type)]
+    if scoped.empty:
+        return []
+    available = set(scoped["久期桶"].astype(str).tolist())
+    preferred = ["存量平均", "<3年", "3-5年", "5-7年", "7-10年", "10-15年", "15-30年", "30年以上"]
+    return [item for item in preferred if item in available]
 
 
 def _render_policy_controls() -> PolicyParameters:

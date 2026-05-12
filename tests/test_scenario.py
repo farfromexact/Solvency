@@ -62,8 +62,11 @@ def test_account_level_adjustment_stays_account_scoped(workbook_data):
 
 def test_factor_table_includes_interest_rate_hedge_assumption(workbook_data):
     result = run_scenario(workbook_data, [])
-    government_bond = result.risk_rates[result.risk_rates["资产映射"] == "国债/地方政府债"].iloc[0]
-    assert government_bond["利率风险抵减因子"] == pytest.approx(0.10940244587074303)
+    local_government_bond = result.risk_rates[
+        (result.risk_rates["资产映射"] == "地方政府债")
+        & (result.risk_rates["适用范围"] == "久期桶：存量平均")
+    ].iloc[0]
+    assert local_government_bond["利率风险抵减因子"] == pytest.approx(0.0833070243)
 
 
 def test_local_government_bond_increase_changes_minimum_capital(workbook_data):

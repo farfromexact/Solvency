@@ -55,6 +55,7 @@ class WorkbookData:
     s01: pd.DataFrame
     s05: pd.DataFrame
     kbqs: pd.DataFrame
+    interest_factor_table: pd.DataFrame
     account_capital: pd.DataFrame
     source_name: str
 
@@ -67,9 +68,12 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
     s05 = _read_report_sheet(excel, sheets["s05"])
     kbqs = _read_kbqs_sheet(excel, sheets["kbqs"])
     optional_sheets = _resolve_optional_sheets(excel.sheet_names)
+    interest_factor_table = pd.DataFrame()
     if "mc_result" in optional_sheets:
+        mc_result = _read_mc_result_sheet(excel, optional_sheets["mc_result"])
+        interest_factor_table = _build_interest_factor_table(mc_result)
         kbqs = _enrich_interest_risk_from_mc_result(
-            kbqs, _read_mc_result_sheet(excel, optional_sheets["mc_result"])
+            kbqs, mc_result
         )
     account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
@@ -80,6 +84,7 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
         s01=s01,
         s05=s05,
         kbqs=kbqs,
+        interest_factor_table=interest_factor_table,
         account_capital=account_capital,
         source_name=source_name,
     )
@@ -149,14 +154,77 @@ def _read_mc_result_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     missing = required.difference(df.columns)
     if missing:
         return pd.DataFrame()
-    keep = ["账户", "资产类型", "账面价值净价", "应收利息", "资产端利率风险MC"]
+    keep = [
+        "账户",
+        "资产类型",
+        "证券名称",
+        "账面价值净价",
+        "应收利息",
+        "修正久期",
+        "PV基础",
+        "资产端利率风险MC",
+    ]
+    keep = [col for col in keep if col in df.columns]
     df = df[keep].copy()
     df["账户"] = df["账户"].fillna("未分类账户").astype(str).str.strip()
     df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
-    for col in ["账面价值净价", "应收利息", "资产端利率风险MC"]:
+    for col in ["账面价值净价", "应收利息", "修正久期", "PV基础", "资产端利率风险MC"]:
+        if col not in df.columns:
+            df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     df["利率风险资产价值"] = df["账面价值净价"] + df["应收利息"]
     return df
+
+
+def _build_interest_factor_table(mc_result: pd.DataFrame) -> pd.DataFrame:
+    if mc_result.empty:
+        return pd.DataFrame()
+
+    df = mc_result.copy()
+    df = df[df["利率风险资产价值"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["久期桶"] = _duration_bucket(df["修正久期"])
+    rows = []
+
+    by_asset = (
+        df.groupby("资产类型", dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
+        .sum()
+        .reset_index()
+    )
+    by_asset["久期桶"] = "存量平均"
+    rows.append(by_asset)
+
+    by_bucket = (
+        df.groupby(["资产类型", "久期桶"], dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
+        .sum()
+        .reset_index()
+    )
+    rows.append(by_bucket)
+
+    out = pd.concat(rows, ignore_index=True)
+    out["利率风险抵减因子"] = _safe_series_div(out["资产端利率风险MC"], out["利率风险资产价值"])
+    out["PV口径抵减因子"] = _safe_series_div(out["资产端利率风险MC"], out["PV基础"])
+    out["来源/口径"] = "MC_RESULT_资产端利率风险明细表反推"
+    return out[
+        [
+            "资产类型",
+            "久期桶",
+            "利率风险资产价值",
+            "PV基础",
+            "资产端利率风险MC",
+            "利率风险抵减因子",
+            "PV口径抵减因子",
+            "来源/口径",
+        ]
+    ]
+
+
+def _duration_bucket(duration: pd.Series) -> pd.Series:
+    bins = [-float("inf"), 3, 5, 7, 10, 15, 30, float("inf")]
+    labels = ["<3年", "3-5年", "5-7年", "7-10年", "10-15年", "15-30年", "30年以上"]
+    return pd.cut(duration, bins=bins, labels=labels, right=False).astype(str)
 
 
 def _enrich_interest_risk_from_mc_result(kbqs: pd.DataFrame, mc_result: pd.DataFrame) -> pd.DataFrame:
