@@ -245,6 +245,7 @@ def _format_metric_comparison(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     ratio_mask = out["指标"].str.contains("充足率")
     for col in ["基准", "情景", "变化"]:
+        out[col] = out[col].astype(object)
         out.loc[ratio_mask, col] = out.loc[ratio_mask, col].map(_fmt_pct)
         out.loc[~ratio_mask, col] = out.loc[~ratio_mask, col].map(_fmt_money)
     return out
