@@ -202,7 +202,7 @@ def _render_result(result) -> None:
 
 
 def _render_detail_tabs(data, result) -> None:
-    tabs = st.tabs(["情景输入", "贡献分析", "风险费率", "暴露变化", "分账户资本", "原始报表"])
+    tabs = st.tabs(["情景输入", "贡献分析", "因子假设", "暴露变化", "分账户资本", "原始报表"])
     with tabs[0]:
         if result.adjustment_summary.empty:
             st.info("当前没有非零情景调整。")
@@ -213,7 +213,7 @@ def _render_detail_tabs(data, result) -> None:
     with tabs[2]:
         st.dataframe(_display_rate_df(result.risk_rates), use_container_width=True, hide_index=True)
     with tabs[3]:
-        st.warning("当前底稿 KBQS_V 的“利率风险暴露”字段为 0；债券/存款利率风险应改用 IN01/MC_RESULT 口径，当前版本暂未纳入精确利率风险重算。")
+        st.info("利率风险情景不再把固收资产简单作为正向暴露处理；新增国债、地方政府债等会按资产端利率风险抵减因子降低寿险利率风险最低资本。")
         st.dataframe(_display_money_df(result.exposure_summary), use_container_width=True, hide_index=True)
     with tabs[4]:
         st.dataframe(_display_money_df(data.account_capital), use_container_width=True, hide_index=True)
@@ -244,8 +244,9 @@ def _display_money_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _display_rate_df(df: pd.DataFrame) -> pd.DataFrame:
     out = _display_money_df(df)
-    if "单位资本率" in df.columns:
-        out["单位资本率"] = df["单位资本率"].map(_fmt_pct)
+    for col in df.columns:
+        if "因子" in str(col) or str(col) == "单位资本率":
+            out[col] = df[col].map(_fmt_pct)
     return out
 
 

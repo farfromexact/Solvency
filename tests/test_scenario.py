@@ -39,11 +39,9 @@ def test_zero_change_scenario_matches_baseline(workbook_data):
 
 
 def test_equity_asset_increase_raises_minimum_capital(workbook_data):
-    equity_rows = workbook_data.kbqs[workbook_data.kbqs["权益价格风险暴露"] > 0]
-    asset_member = str(equity_rows.iloc[0]["资产类型"])
     result = run_scenario(
         workbook_data,
-        [Adjustment(dimension="资产类型", member=asset_member, change_pct=10.0)],
+        [Adjustment(dimension="资产类型", member="上市普通股票", change_pct=10.0)],
     )
     assert result.scenario["最低资本"] > result.baseline["最低资本"]
     assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
@@ -62,8 +60,10 @@ def test_account_level_adjustment_stays_account_scoped(workbook_data):
     assert value_delta > 0
 
 
-def test_interest_risk_exposure_is_enriched_from_mc_result(workbook_data):
-    assert workbook_data.kbqs["利率风险暴露"].sum() > 0
+def test_factor_table_includes_interest_rate_hedge_assumption(workbook_data):
+    result = run_scenario(workbook_data, [])
+    government_bond = result.risk_rates[result.risk_rates["资产映射"] == "国债/地方政府债"].iloc[0]
+    assert government_bond["利率风险抵减因子"] == pytest.approx(0.10940244587074303)
 
 
 def test_local_government_bond_increase_changes_minimum_capital(workbook_data):
@@ -79,19 +79,34 @@ def test_local_government_bond_increase_changes_minimum_capital(workbook_data):
             )
         ],
     )
-    assert result.scenario["最低资本"] > result.baseline["最低资本"]
-    assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
+    assert result.scenario["最低资本"] < result.baseline["最低资本"]
+    assert result.scenario["综合偿付能力充足率"] > result.baseline["综合偿付能力充足率"]
 
 
-def test_position_amount_adjustment_changes_minimum_capital(workbook_data):
-    equity_rows = workbook_data.kbqs[workbook_data.kbqs["权益价格风险暴露"] > 0]
-    asset_member = str(equity_rows.iloc[0]["资产类型"])
+def test_local_government_bond_reduction_raises_minimum_capital(workbook_data):
     result = run_scenario(
         workbook_data,
         [
             Adjustment(
                 dimension="资产类型",
-                member=asset_member,
+                member="地方政府债",
+                change_pct=0.0,
+                mode="position",
+                change_amount=-1_000_000_000.0,
+            )
+        ],
+    )
+    assert result.scenario["最低资本"] > result.baseline["最低资本"]
+    assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
+
+
+def test_position_amount_adjustment_changes_minimum_capital(workbook_data):
+    result = run_scenario(
+        workbook_data,
+        [
+            Adjustment(
+                dimension="资产类型",
+                member="上市普通股票",
                 change_pct=0.0,
                 mode="position",
                 change_amount=100_000_000.0,
