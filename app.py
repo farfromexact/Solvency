@@ -10,7 +10,7 @@ from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summ
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
-DEFAULT_WORKBOOK = Path("1000_20251231_20260113v2.xlsx")
+DEFAULT_WORKBOOK = Path("1000_20260331_20260413.xlsx")
 
 
 st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")

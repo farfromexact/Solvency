@@ -10,7 +10,7 @@ from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summ
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
-WORKBOOK = Path(__file__).resolve().parents[1] / "1000_20251231_20260113v2.xlsx"
+WORKBOOK = Path(__file__).resolve().parents[1] / "1000_20260331_20260413.xlsx"
 
 
 @pytest.fixture(scope="module")
@@ -19,9 +19,9 @@ def workbook_data():
 
 
 def test_loads_baseline_metrics(workbook_data):
-    assert workbook_data.metrics.admitted_assets == pytest.approx(688499498835.82)
-    assert workbook_data.metrics.minimum_capital == pytest.approx(40910952276.13)
-    assert workbook_data.metrics.comprehensive_solvency_ratio == pytest.approx(1.5312, abs=0.0001)
+    assert workbook_data.metrics.admitted_assets == pytest.approx(737283390628.15)
+    assert workbook_data.metrics.minimum_capital == pytest.approx(47793879465.9)
+    assert workbook_data.metrics.comprehensive_solvency_ratio == pytest.approx(1.2970, abs=0.0001)
 
 
 def test_zero_change_scenario_matches_baseline(workbook_data):
@@ -66,7 +66,7 @@ def test_factor_table_includes_interest_rate_hedge_assumption(workbook_data):
         (result.risk_rates["资产映射"] == "地方政府债")
         & (result.risk_rates["适用范围"] == "久期桶：存量平均")
     ].iloc[0]
-    assert local_government_bond["利率风险抵减因子"] == pytest.approx(0.0833070243)
+    assert local_government_bond["利率风险抵减因子"] == pytest.approx(0.0849715831)
 
 
 def test_local_government_bond_increase_changes_minimum_capital(workbook_data):
