@@ -12,9 +12,6 @@ SHEET_PREFIXES = {
     "s05": "S05_",
     "kbqs": "KBQS_V_",
     "fls05acc": "FLS05ACC_",
-}
-
-OPTIONAL_SHEET_PREFIXES = {
     "mc_result": "MC_RESULT_",
 }
 
@@ -67,14 +64,11 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
     s01 = _read_report_sheet(excel, sheets["s01"])
     s05 = _read_report_sheet(excel, sheets["s05"])
     kbqs = _read_kbqs_sheet(excel, sheets["kbqs"])
-    optional_sheets = _resolve_optional_sheets(excel.sheet_names)
-    interest_factor_table = pd.DataFrame()
-    if "mc_result" in optional_sheets:
-        mc_result = _read_mc_result_sheet(excel, optional_sheets["mc_result"])
-        interest_factor_table = _build_interest_factor_table(mc_result)
-        kbqs = _enrich_interest_risk_from_mc_result(
-            kbqs, mc_result
-        )
+    mc_result = _read_mc_result_sheet(excel, sheets["mc_result"])
+    interest_factor_table = _build_interest_factor_table(mc_result)
+    if interest_factor_table.empty:
+        raise WorkbookValidationError("MC_RESULT_资产端利率风险明细表无法反推利率风险抵减因子")
+    kbqs = _enrich_interest_risk_from_mc_result(kbqs, mc_result)
     account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
     source_name = getattr(source, "name", None) or str(source)
@@ -103,15 +97,6 @@ def _resolve_sheets(sheet_names: list[str]) -> dict[str, str]:
         raise WorkbookValidationError(
             "工作簿缺少必要 sheet: " + ", ".join(missing)
         )
-    return resolved
-
-
-def _resolve_optional_sheets(sheet_names: list[str]) -> dict[str, str]:
-    resolved: dict[str, str] = {}
-    for key, prefix in OPTIONAL_SHEET_PREFIXES.items():
-        match = next((name for name in sheet_names if name.startswith(prefix)), None)
-        if match is not None:
-            resolved[key] = match
     return resolved
 
 
