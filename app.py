@@ -11,7 +11,7 @@ from solvency_app.target import solve_target_change
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
-DEFAULT_WORKBOOK = Path("1000_20260331_20260413.xlsx")
+DEFAULT_WORKBOOK = Path("1000_20260430_20260512.xlsx")
 
 
 st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")
