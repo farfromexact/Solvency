@@ -131,14 +131,7 @@ def solve_target_change(
 
 
 def _policy_for_mode(policy: PolicyParameters, mode: str) -> PolicyParameters:
-    if mode != "position":
-        return policy
-    return PolicyParameters(
-        minimum_capital_multiplier=policy.minimum_capital_multiplier,
-        market_risk_multiplier=policy.market_risk_multiplier,
-        credit_risk_multiplier=policy.credit_risk_multiplier,
-        sync_actual_capital_with_assets=True,
-    )
+    return policy
 
 
 def _asset_value(data: WorkbookData, asset_type: str) -> float:

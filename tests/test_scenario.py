@@ -184,8 +184,38 @@ def test_target_solver_finds_comprehensive_position_solution(workbook_data):
     assert result.solved
     assert result.change_amount > 0
     assert result.change_pct > 0
-    assert result.actual_capital_delta == pytest.approx(result.change_amount)
+    assert result.actual_capital_delta == pytest.approx(0.0)
     assert result.achieved_ratio >= result.target_ratio - 0.0001
+
+
+def test_target_position_solution_matches_forward_configuration_scenario(workbook_data):
+    result = solve_target_change(
+        workbook_data,
+        asset_type="地方政府债",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=1.0,
+        mode="position",
+        duration_bucket="15-30年",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    forward = run_scenario(
+        workbook_data,
+        [
+            Adjustment(
+                dimension="资产类型",
+                member="地方政府债",
+                mode="position",
+                change_pct=0.0,
+                change_amount=result.change_amount,
+                duration_bucket="15-30年",
+            )
+        ],
+        PolicyParameters(),
+    )
+    assert result.solved
+    assert forward.scenario["综合偿付能力充足率"] == pytest.approx(result.achieved_ratio)
+    assert forward.scenario["实际资本"] - forward.baseline["实际资本"] == pytest.approx(result.actual_capital_delta)
 
 
 def test_target_solver_reports_no_positive_solution(workbook_data):
@@ -193,7 +223,7 @@ def test_target_solver_reports_no_positive_solution(workbook_data):
         workbook_data,
         asset_type="上市普通股票",
         metric="综合偿付能力充足率",
-        target_delta_pct_points=-5.0,
+        target_delta_pct_points=5.0,
         mode="position",
         scan_steps=20,
         binary_steps=25,
