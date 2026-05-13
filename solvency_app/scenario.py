@@ -126,12 +126,6 @@ FACTOR_ASSUMPTIONS = [
     ("不动产", "不动产项目公司股权、不动产金融产品、REITs等", RiskFactors(real_estate=0.18, category="不动产")),
 ]
 
-CREDIT_SPREAD_ASSUMPTIONS = [
-    ("政策性/政府支持机构债", "政策性金融债、政府支持机构债券", RiskFactors(spread=0.12601615783311923, category="政策性金融债")),
-    ("金融债", "金融债券、同业存单、资本债等", RiskFactors(spread=0.12601615783311923, category="金融债")),
-    ("企业/公司信用债", "企业债、公司债、中期票据、ABS等", RiskFactors(spread=0.05317446311975012, category="信用债")),
-]
-
 
 def build_asset_summary(kbqs: pd.DataFrame, dimension: str) -> pd.DataFrame:
     summary = (
@@ -160,6 +154,7 @@ def run_scenario(
         capital_lookup,
         policy,
         data.interest_factor_table,
+        data.spread_factor_table,
     )
     scenario_capital = _scenario_capital_by_risk(baseline_capital, capital_deltas)
 
@@ -196,7 +191,7 @@ def run_scenario(
     return ScenarioResult(
         baseline=baseline,
         scenario=scenario,
-        risk_rates=_factor_table(data.interest_factor_table),
+        risk_rates=_factor_table(data.interest_factor_table, data.spread_factor_table),
         exposure_summary=_build_exposure_comparison(data.kbqs, adjusted_kbqs),
         contribution_summary=_build_contribution_summary(baseline_capital, scenario_capital),
         adjustment_summary=adjustment_summary,
@@ -244,11 +239,12 @@ def _calculate_capital_deltas(
     capital_lookup: dict[str, float],
     policy: PolicyParameters,
     interest_factor_table: pd.DataFrame,
+    spread_factor_table: pd.DataFrame,
 ) -> dict[str, float]:
     direct = {name: 0.0 for name in [*MARKET_ITEMS, *CREDIT_ITEMS]}
     if not adjustment_summary.empty:
         for _, row in adjustment_summary.iterrows():
-            direct = _add_risk_delta_from_adjustment(kbqs, row, direct, interest_factor_table)
+            direct = _add_risk_delta_from_adjustment(kbqs, row, direct, interest_factor_table, spread_factor_table)
 
     base_market = _vector_from_lookup(capital_lookup, MARKET_ITEMS)
     scenario_market = base_market.copy()
@@ -279,6 +275,7 @@ def _add_risk_delta_from_adjustment(
     adjustment: pd.Series,
     direct: dict[str, float],
     interest_factor_table: pd.DataFrame,
+    spread_factor_table: pd.DataFrame,
 ) -> dict[str, float]:
     out = direct.copy()
     dimension = str(adjustment["维度"])
@@ -297,7 +294,7 @@ def _add_risk_delta_from_adjustment(
     by_type = scoped.groupby(ASSET_TYPE_COL, dropna=False)[VALUE_COL].sum()
     for asset_type, base_value in by_type.items():
         delta = value_delta * float(base_value) / total
-        factors = _factors_for_asset_type(str(asset_type), duration_bucket, interest_factor_table)
+        factors = _factors_for_asset_type(str(asset_type), duration_bucket, interest_factor_table, spread_factor_table)
         # 寿险利率风险按净现金流情景法计量，新增固收资产现金流是对负债端利率风险的抵减。
         out["利率风险"] -= delta * factors.interest_hedge
         out["利差风险"] += delta * factors.spread
@@ -312,16 +309,18 @@ def _factors_for_asset_type(
     asset_type: str,
     duration_bucket: str,
     interest_factor_table: pd.DataFrame,
+    spread_factor_table: pd.DataFrame,
 ) -> RiskFactors:
     interest_hedge = _lookup_interest_factor(interest_factor_table, asset_type, duration_bucket)
+    spread = _lookup_spread_factor(spread_factor_table, asset_type)
     if "政策性金融债" in asset_type or "政府支持机构债" in asset_type:
-        return RiskFactors(interest_hedge=interest_hedge, spread=0.12601615783311923, category="政策性金融债")
+        return RiskFactors(interest_hedge=interest_hedge, spread=spread, category="政策性金融债")
     if any(key in asset_type for key in ["金融债", "同业存单", "资本债"]):
-        return RiskFactors(interest_hedge=interest_hedge, spread=0.12601615783311923, category="金融债")
+        return RiskFactors(interest_hedge=interest_hedge, spread=spread, category="金融债")
     if any(key in asset_type for key in ["企业债", "公司债", "中期票据", "资产支持证券", "资产支持计划"]):
-        return RiskFactors(interest_hedge=interest_hedge, spread=0.05317446311975012, category="信用债")
+        return RiskFactors(interest_hedge=interest_hedge, spread=spread, category="信用债")
     if interest_hedge:
-        return RiskFactors(interest_hedge=interest_hedge, category="MC_RESULT利率资产")
+        return RiskFactors(interest_hedge=interest_hedge, spread=spread, category="MC_RESULT利率资产")
     if "债券型" in asset_type or "固定收益类" in asset_type:
         return RiskFactors(equity=0.06, category="债券基金/固收产品")
     if "上市普通股票" in asset_type or asset_type == "优先股":
@@ -353,6 +352,15 @@ def _lookup_interest_factor(table: pd.DataFrame, asset_type: str, duration_bucke
     if selected.empty:
         return 0.0
     return float(selected.iloc[0]["利率风险抵减因子"] or 0.0)
+
+
+def _lookup_spread_factor(table: pd.DataFrame, asset_type: str) -> float:
+    if table.empty:
+        return 0.0
+    selected = table[table["资产类型"].astype(str) == asset_type]
+    if selected.empty:
+        return 0.0
+    return float(selected.iloc[0]["利差风险因子"] or 0.0)
 
 
 def _baseline_capital_by_risk(capital_lookup: dict[str, float]) -> pd.DataFrame:
@@ -416,7 +424,7 @@ def _lookup_capital(capital_lookup: dict[str, float], capital_item: str) -> floa
     return 0.0
 
 
-def _factor_table(interest_factor_table: pd.DataFrame) -> pd.DataFrame:
+def _factor_table(interest_factor_table: pd.DataFrame, spread_factor_table: pd.DataFrame) -> pd.DataFrame:
     rows = []
     if not interest_factor_table.empty:
         for _, row in interest_factor_table.iterrows():
@@ -433,20 +441,21 @@ def _factor_table(interest_factor_table: pd.DataFrame) -> pd.DataFrame:
                     "来源/口径": row["来源/口径"],
                 }
             )
-    for category, scope, factors in CREDIT_SPREAD_ASSUMPTIONS:
-        rows.append(
-            {
-                "资产映射": category,
-                "适用范围": scope,
-                "利率风险抵减因子": 0.0,
-                "利差风险因子": factors.spread,
-                "交易对手风险因子": factors.counterparty,
-                "权益价格风险因子": factors.equity,
-                "房地产风险因子": factors.real_estate,
-                "汇率风险因子": factors.fx,
-                "来源/口径": "当前简化信用风险参数；后续可替换为监管规则参数表",
-            }
-        )
+    if not spread_factor_table.empty:
+        for _, row in spread_factor_table.iterrows():
+            rows.append(
+                {
+                    "资产映射": row["资产类型"],
+                    "适用范围": "利差风险",
+                    "利率风险抵减因子": 0.0,
+                    "利差风险因子": row["利差风险因子"],
+                    "交易对手风险因子": 0.0,
+                    "权益价格风险因子": 0.0,
+                    "房地产风险因子": 0.0,
+                    "汇率风险因子": 0.0,
+                    "来源/口径": row["来源/口径"],
+                }
+            )
     for category, scope, factors in FACTOR_ASSUMPTIONS:
         rows.append(
             {

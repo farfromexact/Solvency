@@ -13,6 +13,7 @@ SHEET_PREFIXES = {
     "kbqs": "KBQS_V_",
     "fls05acc": "FLS05ACC_",
     "mc_result": "MC_RESULT_",
+    "cal_detail": "CAL_DETAIL_",
 }
 
 EXPOSURE_COLUMNS = [
@@ -53,6 +54,7 @@ class WorkbookData:
     s05: pd.DataFrame
     kbqs: pd.DataFrame
     interest_factor_table: pd.DataFrame
+    spread_factor_table: pd.DataFrame
     account_capital: pd.DataFrame
     source_name: str
 
@@ -69,6 +71,7 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
     if interest_factor_table.empty:
         raise WorkbookValidationError("MC_RESULT_资产端利率风险明细表无法反推利率风险抵减因子")
     kbqs = _enrich_interest_risk_from_mc_result(kbqs, mc_result)
+    spread_factor_table = _build_spread_factor_table(_read_cal_detail_sheet(excel, sheets["cal_detail"]))
     account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
     source_name = getattr(source, "name", None) or str(source)
@@ -79,6 +82,7 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
         s05=s05,
         kbqs=kbqs,
         interest_factor_table=interest_factor_table,
+        spread_factor_table=spread_factor_table,
         account_capital=account_capital,
         source_name=source_name,
     )
@@ -210,6 +214,42 @@ def _duration_bucket(duration: pd.Series) -> pd.Series:
     bins = [-float("inf"), 3, 5, 7, 10, 15, 30, float("inf")]
     labels = ["<3年", "3-5年", "5-7年", "7-10年", "10-15年", "15-30年", "30年以上"]
     return pd.cut(duration, bins=bins, labels=labels, right=False).astype(str)
+
+
+def _read_cal_detail_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(excel, sheet_name=sheet_name, header=1)
+    required = {"资产类型", "认可价值", "风险暴露.1", "RF.1", "MC.1"}
+    missing = required.difference(df.columns)
+    if missing:
+        return pd.DataFrame()
+    keep = ["资产类型", "认可价值", "风险暴露.1", "RF.1", "MC.1"]
+    df = df[keep].copy()
+    df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
+    for col in ["认可价值", "风险暴露.1", "RF.1", "MC.1"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df.rename(
+        columns={
+            "风险暴露.1": "利差风险暴露",
+            "RF.1": "利差风险RF",
+            "MC.1": "利差风险MC",
+        }
+    )
+
+
+def _build_spread_factor_table(cal_detail: pd.DataFrame) -> pd.DataFrame:
+    if cal_detail.empty:
+        return pd.DataFrame()
+    df = cal_detail[cal_detail["利差风险暴露"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
+    out = (
+        df.groupby("资产类型", dropna=False)[["认可价值", "利差风险暴露", "利差风险MC"]]
+        .sum()
+        .reset_index()
+    )
+    out["利差风险因子"] = _safe_series_div(out["利差风险MC"], out["利差风险暴露"])
+    out["来源/口径"] = "CAL_DETAIL_最低资本明细表反推"
+    return out[["资产类型", "认可价值", "利差风险暴露", "利差风险MC", "利差风险因子", "来源/口径"]]
 
 
 def _enrich_interest_risk_from_mc_result(kbqs: pd.DataFrame, mc_result: pd.DataFrame) -> pd.DataFrame:

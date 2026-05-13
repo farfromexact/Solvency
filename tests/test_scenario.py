@@ -103,6 +103,29 @@ def test_local_government_bond_reduction_raises_minimum_capital(workbook_data):
     assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
 
 
+def test_policy_financial_bond_increase_uses_dynamic_spread_factor(workbook_data):
+    result = run_scenario(
+        workbook_data,
+        [
+            Adjustment(
+                dimension="资产类型",
+                member="政策性金融债",
+                change_pct=0.0,
+                mode="position",
+                change_amount=1_000_000_000.0,
+            )
+        ],
+    )
+    assert result.scenario["最低资本"] < result.baseline["最低资本"]
+    spread_factor = workbook_data.spread_factor_table[
+        workbook_data.spread_factor_table["资产类型"] == "政策性金融债"
+    ].iloc[0]
+    assert spread_factor["利差风险因子"] == pytest.approx(
+        spread_factor["利差风险MC"] / spread_factor["利差风险暴露"]
+    )
+    assert 0 < spread_factor["利差风险因子"] < 0.05
+
+
 def test_position_amount_adjustment_changes_minimum_capital(workbook_data):
     result = run_scenario(
         workbook_data,
