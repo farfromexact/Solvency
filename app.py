@@ -7,6 +7,7 @@ import streamlit as st
 
 from solvency_app.policies import load_policy_overlays
 from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summary, run_scenario
+from solvency_app.target import solve_target_change
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
@@ -40,8 +41,8 @@ def main() -> None:
         return
 
     _render_baseline(data)
-    adjustments = _render_scenario_controls(data)
     policy = _render_policy_controls()
+    adjustments = _render_scenario_controls(data, policy)
     result = run_scenario(data, adjustments, policy)
     _render_result(result)
     _render_detail_tabs(data, result)
@@ -63,9 +64,9 @@ def _render_baseline(data) -> None:
     cols[4].metric("综合偿付能力充足率", _fmt_pct(metrics.comprehensive_solvency_ratio))
 
 
-def _render_scenario_controls(data) -> list[Adjustment]:
+def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment]:
     st.subheader("情景模块")
-    position_tab, price_tab, base_tab = st.tabs(["加仓/减仓/建仓", "上涨/下跌", "基准资产暴露"])
+    position_tab, price_tab, target_tab, base_tab = st.tabs(["加仓/减仓/建仓", "上涨/下跌", "目标倒推", "基准资产暴露"])
     adjustments: list[Adjustment] = []
 
     with position_tab:
@@ -75,6 +76,9 @@ def _render_scenario_controls(data) -> list[Adjustment]:
     with price_tab:
         st.caption("用于模拟资产价格上涨或下跌。估值变动默认进入实际资本和核心资本，同时按暴露变化估算最低资本影响。")
         adjustments.extend(_render_adjustment_rows(data, mode_name="price", key_prefix="price"))
+
+    with target_tab:
+        _render_target_solver(data, policy)
 
     with base_tab:
         summary = build_asset_summary(data.kbqs, "资产类型")
@@ -168,6 +172,73 @@ def _duration_options(data, asset_type: str) -> list[str]:
     available = set(scoped["久期桶"].astype(str).tolist())
     preferred = ["存量平均", "<3年", "3-5年", "5-7年", "7-10年", "10-15年", "15-30年", "30年以上"]
     return [item for item in preferred if item in available]
+
+
+def _render_target_solver(data, policy: PolicyParameters) -> None:
+    st.caption("按目标偿付能力充足率倒推单一资产类型所需的正向加仓金额或上涨幅度。加仓倒推固定同步认可资产变化到实际资本和核心资本。")
+    summary = build_asset_summary(data.kbqs, "资产类型")
+    options = summary["资产类型"].astype(str).tolist()
+    cols = st.columns([1.5, 1.2, 3, 1.3])
+    metric = cols[0].radio(
+        "目标指标",
+        ["综合偿付能力充足率", "核心偿付能力充足率"],
+        horizontal=True,
+        key="target_metric",
+    )
+    target_delta = cols[1].number_input(
+        "目标变化(pct)",
+        min_value=-100.0,
+        max_value=100.0,
+        value=5.0,
+        step=0.5,
+        key="target_delta_pct",
+        help="按百分点处理，例如 5 表示从 129.70% 到 134.70%。",
+    )
+    asset_type = cols[2].selectbox("资产类型", options, key="target_asset_type")
+    duration_options = _duration_options(data, asset_type)
+    duration_bucket = "存量平均"
+    if duration_options:
+        duration_bucket = cols[3].selectbox("债券久期", duration_options, key="target_duration_bucket")
+    else:
+        cols[3].metric("债券久期", "不适用")
+
+    results = [
+        solve_target_change(
+            data=data,
+            asset_type=asset_type,
+            metric=metric,
+            target_delta_pct_points=float(target_delta),
+            mode="position",
+            duration_bucket=duration_bucket,
+            policy=policy,
+        ),
+        solve_target_change(
+            data=data,
+            asset_type=asset_type,
+            metric=metric,
+            target_delta_pct_points=float(target_delta),
+            mode="price",
+            duration_bucket=duration_bucket,
+            policy=policy,
+        ),
+    ]
+    rows = []
+    for result in results:
+        rows.append(
+            {
+                "动作": "加仓/建仓" if result.mode == "position" else "上涨/下跌",
+                "状态": "有解" if result.solved else "无解",
+                "基准充足率": result.baseline_ratio,
+                "目标充足率": result.target_ratio,
+                "求解后充足率": result.achieved_ratio,
+                "所需变化金额": result.change_amount if result.solved else 0.0,
+                "所需变化比例": result.change_pct if result.solved else 0.0,
+                "最低资本变化": result.minimum_capital_delta,
+                "实际资本变化": result.actual_capital_delta,
+                "说明": result.reason,
+            }
+        )
+    st.dataframe(_display_money_df(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
 
 
 def _render_policy_controls() -> PolicyParameters:
@@ -286,7 +357,7 @@ def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _is_ratio_column(column_name: str) -> bool:
-    ratio_names = ("变化率", "单位资本率", "核心偿付能力充足率", "综合偿付能力充足率")
+    ratio_names = ("变化率", "变化比例", "所需变化比例", "单位资本率", "核心偿付能力充足率", "综合偿付能力充足率")
     return any(name in column_name for name in ratio_names)
 
 

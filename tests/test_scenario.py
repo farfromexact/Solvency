@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summary, run_scenario
+from solvency_app.target import solve_target_change
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
@@ -164,6 +165,89 @@ def test_minimum_capital_policy_multiplier(workbook_data):
     assert result.scenario["最低资本"] == pytest.approx(
         result.baseline["最低资本"] * 0.95
     )
+
+
+def test_target_solver_finds_comprehensive_position_solution(workbook_data):
+    result = solve_target_change(
+        workbook_data,
+        asset_type="地方政府债",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=1.0,
+        mode="position",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    assert result.solved
+    assert result.change_amount > 0
+    assert result.change_pct > 0
+    assert result.actual_capital_delta == pytest.approx(result.change_amount)
+    assert result.achieved_ratio >= result.target_ratio - 0.0001
+
+
+def test_target_solver_reports_no_positive_solution(workbook_data):
+    result = solve_target_change(
+        workbook_data,
+        asset_type="上市普通股票",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=-5.0,
+        mode="position",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    assert not result.solved
+    assert result.change_amount == 0
+
+
+def test_target_solver_supports_core_metric(workbook_data):
+    result = solve_target_change(
+        workbook_data,
+        asset_type="政策性金融债",
+        metric="核心偿付能力充足率",
+        target_delta_pct_points=1.0,
+        mode="price",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    assert result.solved
+    assert result.target_ratio == pytest.approx(result.baseline_ratio + 0.01)
+
+
+def test_target_solver_duration_bucket_changes_solution(workbook_data):
+    short = solve_target_change(
+        workbook_data,
+        asset_type="地方政府债",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=1.0,
+        mode="position",
+        duration_bucket="7-10年",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    long = solve_target_change(
+        workbook_data,
+        asset_type="地方政府债",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=1.0,
+        mode="position",
+        duration_bucket="15-30年",
+        scan_steps=20,
+        binary_steps=25,
+    )
+    assert short.solved and long.solved
+    assert short.change_amount != pytest.approx(long.change_amount)
+
+
+def test_target_solver_zero_change_returns_zero_amount(workbook_data):
+    result = solve_target_change(
+        workbook_data,
+        asset_type="地方政府债",
+        metric="综合偿付能力充足率",
+        target_delta_pct_points=0.0,
+        mode="position",
+    )
+    assert result.solved
+    assert result.change_amount == 0
+    assert result.change_pct == 0
 
 
 def test_missing_workbook_raises_clear_error():
