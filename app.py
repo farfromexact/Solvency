@@ -184,28 +184,47 @@ def _render_target_solver(data, policy: PolicyParameters) -> None:
     with st.form("target_solver_form"):
         summary = build_asset_summary(data.kbqs, "资产类型")
         options = summary["资产类型"].astype(str).tolist()
-        cols = st.columns([1.5, 1.5, 3, 1.3])
+        cols = st.columns([1.4, 1.4, 1.4, 3, 1.3])
         metric = cols[0].radio(
             "目标指标",
             ["综合偿付能力充足率", "核心偿付能力充足率"],
             horizontal=True,
             key="target_metric",
         )
-        target_ratio = cols[1].segmented_control(
-            "目标充足率",
-            options=[1.0, 1.2, 1.5],
-            default=1.2,
-            format_func=_fmt_pct,
-            key="target_ratio_choice",
+        target_mode = cols[1].radio(
+            "目标方式",
+            ["快捷目标", "手动变化"],
+            horizontal=True,
+            key="target_input_mode",
         )
-        target_delta = (float(target_ratio) - float(run_scenario(data, [], policy).scenario[metric])) * 100.0
-        asset_type = cols[2].selectbox("资产类型", options, key="target_asset_type")
+        baseline_ratio = float(run_scenario(data, [], policy).scenario[metric])
+        if target_mode == "快捷目标":
+            target_ratio = cols[2].segmented_control(
+                "目标充足率",
+                options=[1.0, 1.2, 1.5],
+                default=1.2,
+                format_func=_fmt_pct,
+                key="target_ratio_choice",
+            )
+            target_delta = (float(target_ratio) - baseline_ratio) * 100.0
+        else:
+            target_delta = cols[2].number_input(
+                "目标变化(pct)",
+                min_value=-100.0,
+                max_value=100.0,
+                value=5.0,
+                step=0.5,
+                key="target_delta_pct",
+                help="按百分点处理，例如 5 表示从 129.70% 到 134.70%。",
+            )
+            target_ratio = baseline_ratio + float(target_delta) / 100.0
+        asset_type = cols[3].selectbox("资产类型", options, key="target_asset_type")
         duration_options = _duration_options(data, asset_type)
         duration_bucket = "存量平均"
         if duration_options:
-            duration_bucket = cols[3].selectbox("债券久期", duration_options, key="target_duration_bucket")
+            duration_bucket = cols[4].selectbox("债券久期", duration_options, key="target_duration_bucket")
         else:
-            cols[3].metric("债券久期", "不适用")
+            cols[4].metric("债券久期", "不适用")
         submitted = st.form_submit_button("开始倒推")
 
     policy_signature = (
@@ -214,7 +233,7 @@ def _render_target_solver(data, policy: PolicyParameters) -> None:
         policy.credit_risk_multiplier,
         policy.sync_actual_capital_with_assets,
     )
-    input_signature = (metric, float(target_ratio), asset_type, duration_bucket, policy_signature)
+    input_signature = (metric, target_mode, float(target_ratio), float(target_delta), asset_type, duration_bucket, policy_signature)
     if submitted:
         results = [
             solve_target_change(
