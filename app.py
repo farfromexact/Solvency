@@ -188,10 +188,55 @@ def _render_target_solver(data, policy: PolicyParameters) -> None:
         key="target_metric",
     )
     baseline_ratio = float(run_scenario(data, [], policy).scenario[metric])
-    shortcut_cols = st.columns([1, 1, 1, 4])
-    for col, target in zip(shortcut_cols[:3], [1.0, 1.2, 1.5]):
-        if col.button(_fmt_pct(target), key=f"target_shortcut_{int(target * 100)}"):
-            st.session_state["target_delta_pct"] = round((target - baseline_ratio) * 100.0, 2)
+    st.markdown(
+        """
+        <style>
+        .st-key-target_shortcuts .shortcut-label {
+            color: rgb(49, 51, 63);
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 1.6;
+            margin: 0 0 0.25rem;
+        }
+        .st-key-target_shortcuts div[data-testid="stHorizontalBlock"] {
+            gap: 0.45rem;
+        }
+        .st-key-target_shortcuts div[data-testid="column"] {
+            flex: 0 0 auto;
+            width: auto !important;
+            min-width: 0 !important;
+        }
+        .st-key-target_shortcuts button {
+            min-width: 5.25rem;
+            min-height: 2.3rem;
+            border-radius: 0.45rem;
+            font-weight: 400;
+        }
+        .st-key-target_shortcuts div[data-testid="column"]:nth-of-type(1) button {
+            background: #fff1f2;
+            border-color: #f4a6ad;
+            color: #9f2633;
+        }
+        .st-key-target_shortcuts div[data-testid="column"]:nth-of-type(2) button {
+            background: #fff8db;
+            border-color: #e6cd73;
+            color: #7a5a00;
+        }
+        .st-key-target_shortcuts div[data-testid="column"]:nth-of-type(3) button {
+            background: #edf8ef;
+            border-color: #94cfa0;
+            color: #236b36;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(key="target_shortcuts"):
+        st.markdown('<div class="shortcut-label">shortcut</div>', unsafe_allow_html=True)
+        shortcut_cols = st.columns([0.58, 0.58, 0.58, 6], gap="small")
+        for col, target in zip(shortcut_cols[:3], [1.0, 1.2, 1.5]):
+            if col.button(_fmt_pct(target), key=f"target_shortcut_{int(target * 100)}"):
+                st.session_state["target_delta_pct"] = round((target - baseline_ratio) * 100.0, 2)
 
     with st.form("target_solver_form"):
         summary = build_asset_summary(data.kbqs, "资产类型")
