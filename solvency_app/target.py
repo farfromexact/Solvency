@@ -65,10 +65,9 @@ def solve_target_change(
         )
 
     if current_value <= 0:
-        return _unsolved(mode, metric, asset_type, duration_bucket, baseline_ratio, target_ratio, "当前资产类型认可价值为 0，无法按正向金额求解。")
+        return _unsolved(mode, metric, asset_type, duration_bucket, baseline_ratio, target_ratio, "当前资产类型认可价值为 0，无法按金额求解。")
 
     max_amount = current_value * max_multiple
-    baseline_gap = baseline_ratio - target_ratio
     if _meets_target(baseline_ratio, target_ratio, target_delta_pct_points, tolerance):
         return _result(
             data=data,
@@ -83,20 +82,43 @@ def solve_target_change(
             reason="基准已经达到目标。",
         )
 
-    previous_amount = 0.0
-    previous_ratio = baseline_ratio
-    bracket: tuple[float, float] | None = None
-    for step in range(1, scan_steps + 1):
-        amount = max_amount * step / scan_steps
-        ratio = _ratio_at(data, effective_policy, mode, metric, asset_type, duration_bucket, amount)
-        if _crosses_target(previous_ratio, ratio, target_ratio, baseline_gap):
-            bracket = (previous_amount, amount)
-            break
-        previous_amount = amount
-        previous_ratio = ratio
+    candidates = []
+    positive = _solve_amount_direction(
+        data=data,
+        policy=effective_policy,
+        mode=mode,
+        metric=metric,
+        asset_type=asset_type,
+        duration_bucket=duration_bucket,
+        target_ratio=target_ratio,
+        target_delta_pct_points=target_delta_pct_points,
+        endpoint=max_amount,
+        scan_steps=scan_steps,
+        binary_steps=binary_steps,
+        tolerance=tolerance,
+    )
+    negative = _solve_amount_direction(
+        data=data,
+        policy=effective_policy,
+        mode=mode,
+        metric=metric,
+        asset_type=asset_type,
+        duration_bucket=duration_bucket,
+        target_ratio=target_ratio,
+        target_delta_pct_points=target_delta_pct_points,
+        endpoint=-current_value,
+        scan_steps=scan_steps,
+        binary_steps=binary_steps,
+        tolerance=tolerance,
+    )
+    if positive is not None:
+        candidates.append(positive)
+    if negative is not None:
+        candidates.append(negative)
 
-    if bracket is None:
-        upper_ratio = _ratio_at(data, effective_policy, mode, metric, asset_type, duration_bucket, max_amount)
+    if not candidates:
+        positive_ratio = _ratio_at(data, effective_policy, mode, metric, asset_type, duration_bucket, max_amount)
+        negative_ratio = _ratio_at(data, effective_policy, mode, metric, asset_type, duration_bucket, -current_value)
         return _unsolved(
             mode,
             metric,
@@ -104,17 +126,12 @@ def solve_target_change(
             duration_bucket,
             baseline_ratio,
             target_ratio,
-            f"正向变化到当前资产认可价值的 {max_multiple:.0f} 倍仍未达到目标；上限结果为 {upper_ratio:.4%}。",
+            (
+                f"加仓/上涨到当前资产认可价值的 {max_multiple:.0f} 倍、减仓/下跌到 0 "
+                f"均未达到目标；正向上限结果为 {positive_ratio:.4%}，负向上限结果为 {negative_ratio:.4%}。"
+            ),
         )
-
-    low, high = bracket
-    for _ in range(binary_steps):
-        mid = (low + high) / 2.0
-        ratio = _ratio_at(data, effective_policy, mode, metric, asset_type, duration_bucket, mid)
-        if _meets_target(ratio, target_ratio, target_delta_pct_points, tolerance):
-            high = mid
-        else:
-            low = mid
+    change_amount = min(candidates, key=abs)
 
     return _result(
         data=data,
@@ -124,9 +141,9 @@ def solve_target_change(
         asset_type=asset_type,
         duration_bucket=duration_bucket,
         target_ratio=target_ratio,
-        change_amount=high,
+        change_amount=change_amount,
         solved=True,
-        reason="已找到正向最小变化金额。",
+        reason="已找到绝对值最小的变化金额。",
     )
 
 
@@ -163,15 +180,44 @@ def _ratio_at(
     return float(result.scenario[metric])
 
 
+def _solve_amount_direction(
+    data: WorkbookData,
+    policy: PolicyParameters,
+    mode: str,
+    metric: str,
+    asset_type: str,
+    duration_bucket: str,
+    target_ratio: float,
+    target_delta_pct_points: float,
+    endpoint: float,
+    scan_steps: int,
+    binary_steps: int,
+    tolerance: float,
+) -> float | None:
+    previous_amount = 0.0
+    for step in range(1, scan_steps + 1):
+        amount = endpoint * step / scan_steps
+        ratio = _ratio_at(data, policy, mode, metric, asset_type, duration_bucket, amount)
+        if not _meets_target(ratio, target_ratio, target_delta_pct_points, tolerance):
+            previous_amount = amount
+            continue
+
+        low, high = previous_amount, amount
+        for _ in range(binary_steps):
+            mid = (low + high) / 2.0
+            mid_ratio = _ratio_at(data, policy, mode, metric, asset_type, duration_bucket, mid)
+            if _meets_target(mid_ratio, target_ratio, target_delta_pct_points, tolerance):
+                high = mid
+            else:
+                low = mid
+        return high
+    return None
+
+
 def _meets_target(value: float, target: float, target_delta_pct_points: float, tolerance: float) -> bool:
     if target_delta_pct_points >= 0:
         return value + tolerance >= target
     return value - tolerance <= target
-
-
-def _crosses_target(previous: float, current: float, target: float, baseline_gap: float) -> bool:
-    current_gap = current - target
-    return current_gap == 0 or current_gap * baseline_gap <= 0 or min(previous, current) <= target <= max(previous, current)
 
 
 def _result(

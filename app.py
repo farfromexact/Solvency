@@ -176,7 +176,7 @@ def _duration_options(data, asset_type: str) -> list[str]:
 
 def _render_target_solver(data, policy: PolicyParameters) -> None:
     st.caption(
-        "按目标偿付能力充足率倒推单一资产类型所需的正向加仓金额或上涨幅度。"
+        "按目标偿付能力充足率倒推单一资产类型所需的最小变化金额，可返回加仓/上涨或减仓/下跌。"
         "加仓倒推只改变资产配置和最低资本链条；上涨/下跌按估值变动同步影响实际资本和核心资本。"
     )
     summary = build_asset_summary(data.kbqs, "资产类型")
