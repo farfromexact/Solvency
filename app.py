@@ -11,9 +11,6 @@ from solvency_app.target import solve_target_change
 from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
-DEFAULT_WORKBOOK = Path("1000_20260430_20260512.xlsx")
-
-
 st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")
 
 
@@ -21,15 +18,11 @@ def main() -> None:
     st.title("偿付能力资产配置情景测算")
     st.caption("基于现有底稿反推口径的情景估算，不替代监管报送系统或完整偿二代复算引擎。")
 
-    with st.sidebar:
-        st.header("数据导入")
-        uploaded = st.file_uploader("上传月度偿付能力底稿", type=["xlsx"])
-        use_default = st.checkbox("使用当前文件夹默认底稿", value=uploaded is None)
-        source = uploaded if uploaded is not None else DEFAULT_WORKBOOK if use_default else None
-
+    source = _resolve_default_workbook()
     if source is None:
-        st.info("请上传 Excel 底稿，或勾选使用当前文件夹默认底稿。")
+        st.error("当前目录没有找到唯一的 Excel 底稿。请在 repo 根目录只保留一个 .xlsx 底稿文件。")
         return
+    st.caption(f"当前底稿：{source.name}")
 
     try:
         data = _load_data(source)
@@ -51,6 +44,14 @@ def main() -> None:
 @st.cache_data(show_spinner="正在解析底稿...")
 def _load_data(source):
     return load_workbook_data(source)
+
+
+def _resolve_default_workbook() -> Path | None:
+    workbooks = sorted(Path(".").glob("*.xlsx"))
+    workbooks = [path for path in workbooks if not path.name.startswith("~$")]
+    if len(workbooks) != 1:
+        return None
+    return workbooks[0]
 
 
 def _render_baseline(data) -> None:
@@ -137,15 +138,16 @@ def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjus
             )
             amount = 0.0
         else:
-            amount_wan = input_col.number_input(
-                "变化金额(万元)",
-                min_value=-10_000_000.0,
-                max_value=10_000_000.0,
+            amount_yi = input_col.number_input(
+                "变化金额(亿元)",
+                min_value=-10_000.0,
+                max_value=10_000.0,
                 value=0.0,
-                step=1000.0,
+                step=1.0,
+                format="%.2f",
                 key=f"{key_prefix}_amount_{dimension}_{idx}",
             )
-            amount = float(amount_wan) * 10000.0
+            amount = float(amount_yi) * 100000000.0
             pct = 0.0
         current_value = float(summary.loc[summary[dimension].astype(str) == member, "认可价值"].sum())
         cols[3].metric("当前认可价值", _fmt_money(current_value))
@@ -385,7 +387,7 @@ def _is_ratio_column(column_name: str) -> bool:
 
 
 def _fmt_money(value: float) -> str:
-    return f"{value / 10000:,.2f} 万元"
+    return f"{value / 100000000:,.2f} 亿元"
 
 
 def _fmt_pct(value: float) -> str:
