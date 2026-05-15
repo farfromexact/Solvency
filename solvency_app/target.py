@@ -40,8 +40,8 @@ def solve_target_change(
     policy: PolicyParameters | None = None,
     max_multiple: float = 5.0,
     tolerance_pct_points: float = 0.01,
-    scan_steps: int = 80,
-    binary_steps: int = 50,
+    scan_steps: int = 40,
+    binary_steps: int = 30,
 ) -> TargetSolveResult:
     effective_policy = _policy_for_mode(policy or PolicyParameters(), mode)
     current_value = _asset_value(data, asset_type)

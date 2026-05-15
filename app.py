@@ -176,79 +176,92 @@ def _duration_options(data, asset_type: str) -> list[str]:
 
 def _render_target_solver(data, policy: PolicyParameters) -> None:
     st.caption(
-        "按目标偿付能力充足率倒推单一资产类型所需的最小变化金额，可返回加仓/上涨或减仓/下跌。"
+        "按目标偿付能力充足率倒推单一资产类型所需的最小变化金额，可返回加仓/上涨或减仓/下跌。点击按钮后计算，避免每次调整参数都重跑。"
         "加仓倒推只改变资产配置和最低资本链条；上涨/下跌按估值变动同步影响实际资本和核心资本。"
     )
-    summary = build_asset_summary(data.kbqs, "资产类型")
-    options = summary["资产类型"].astype(str).tolist()
-    cols = st.columns([1.5, 1.2, 3, 1.3])
-    metric = cols[0].radio(
-        "目标指标",
-        ["综合偿付能力充足率", "核心偿付能力充足率"],
-        horizontal=True,
-        key="target_metric",
-    )
-    target_delta = cols[1].number_input(
-        "目标变化(pct)",
-        min_value=-100.0,
-        max_value=100.0,
-        value=5.0,
-        step=0.5,
-        key="target_delta_pct",
-        help="按百分点处理，例如 5 表示从 129.70% 到 134.70%。",
-    )
-    asset_type = cols[2].selectbox("资产类型", options, key="target_asset_type")
-    duration_options = _duration_options(data, asset_type)
-    duration_bucket = "存量平均"
-    if duration_options:
-        duration_bucket = cols[3].selectbox("债券久期", duration_options, key="target_duration_bucket")
-    else:
-        cols[3].metric("债券久期", "不适用")
-
-    results = [
-        solve_target_change(
-            data=data,
-            asset_type=asset_type,
-            metric=metric,
-            target_delta_pct_points=float(target_delta),
-            mode="position",
-            duration_bucket=duration_bucket,
-            policy=policy,
-        ),
-        solve_target_change(
-            data=data,
-            asset_type=asset_type,
-            metric=metric,
-            target_delta_pct_points=float(target_delta),
-            mode="price",
-            duration_bucket=duration_bucket,
-            policy=policy,
-        ),
-    ]
-    rows = []
-    for result in results:
-        if result.mode == "position":
-            action = "加仓/建仓（配置口径）"
-            replay_note = "正算复现需在加仓/减仓/建仓模块输入同一变化金额，并选择相同债券久期。"
-        else:
-            action = "上涨/下跌（估值变动）"
-            replay_note = "正算复现需在上涨/下跌模块输入同一变化金额，并选择相同债券久期。"
-        rows.append(
-            {
-                "动作": action,
-                "状态": "有解" if result.solved else "无解",
-                "基准充足率": result.baseline_ratio,
-                "目标充足率": result.target_ratio,
-                "求解后充足率": result.achieved_ratio,
-                "所需变化金额": result.change_amount if result.solved else 0.0,
-                "所需变化比例": result.change_pct if result.solved else 0.0,
-                "最低资本变化": result.minimum_capital_delta,
-                "实际资本变化": result.actual_capital_delta,
-                "说明": result.reason,
-                "正算复现口径": replay_note,
-            }
+    with st.form("target_solver_form"):
+        summary = build_asset_summary(data.kbqs, "资产类型")
+        options = summary["资产类型"].astype(str).tolist()
+        cols = st.columns([1.5, 1.2, 3, 1.3])
+        metric = cols[0].radio(
+            "目标指标",
+            ["综合偿付能力充足率", "核心偿付能力充足率"],
+            horizontal=True,
+            key="target_metric",
         )
-    st.dataframe(_display_money_df(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
+        target_delta = cols[1].number_input(
+            "目标变化(pct)",
+            min_value=-100.0,
+            max_value=100.0,
+            value=5.0,
+            step=0.5,
+            key="target_delta_pct",
+            help="按百分点处理，例如 5 表示从 129.70% 到 134.70%。",
+        )
+        asset_type = cols[2].selectbox("资产类型", options, key="target_asset_type")
+        duration_options = _duration_options(data, asset_type)
+        duration_bucket = "存量平均"
+        if duration_options:
+            duration_bucket = cols[3].selectbox("债券久期", duration_options, key="target_duration_bucket")
+        else:
+            cols[3].metric("债券久期", "不适用")
+        submitted = st.form_submit_button("开始倒推")
+
+    input_signature = (metric, float(target_delta), asset_type, duration_bucket)
+    if submitted:
+        results = [
+            solve_target_change(
+                data=data,
+                asset_type=asset_type,
+                metric=metric,
+                target_delta_pct_points=float(target_delta),
+                mode="position",
+                duration_bucket=duration_bucket,
+                policy=policy,
+            ),
+            solve_target_change(
+                data=data,
+                asset_type=asset_type,
+                metric=metric,
+                target_delta_pct_points=float(target_delta),
+                mode="price",
+                duration_bucket=duration_bucket,
+                policy=policy,
+            ),
+        ]
+        rows = []
+        for result in results:
+            if result.mode == "position":
+                action = "加仓/建仓（配置口径）"
+                replay_note = "正算复现需在加仓/减仓/建仓模块输入同一变化金额，并选择相同债券久期。"
+            else:
+                action = "上涨/下跌（估值变动）"
+                replay_note = "正算复现需在上涨/下跌模块输入同一变化金额，并选择相同债券久期。"
+            rows.append(
+                {
+                    "动作": action,
+                    "状态": "有解" if result.solved else "无解",
+                    "基准充足率": result.baseline_ratio,
+                    "目标充足率": result.target_ratio,
+                    "求解后充足率": result.achieved_ratio,
+                    "所需变化金额": result.change_amount if result.solved else 0.0,
+                    "所需变化比例": result.change_pct if result.solved else 0.0,
+                    "最低资本变化": result.minimum_capital_delta,
+                    "实际资本变化": result.actual_capital_delta,
+                    "说明": result.reason,
+                    "正算复现口径": replay_note,
+                }
+            )
+        st.session_state["target_solver_signature"] = input_signature
+        st.session_state["target_solver_rows"] = rows
+
+    if "target_solver_rows" not in st.session_state:
+        st.info("设置目标参数后点击“开始倒推”计算。")
+        return
+    if st.session_state.get("target_solver_signature") != input_signature:
+        st.info("目标参数已变化，点击“开始倒推”刷新结果。")
+        return
+    st.dataframe(_display_money_df(pd.DataFrame(st.session_state["target_solver_rows"])), use_container_width=True, hide_index=True)
 
 
 def _render_policy_controls() -> PolicyParameters:
