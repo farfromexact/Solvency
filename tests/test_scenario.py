@@ -74,6 +74,21 @@ def test_factor_table_includes_interest_rate_hedge_assumption(workbook_data):
     assert local_government_bond["利率风险抵减因子"] == pytest.approx(source_factor["利率风险抵减因子"])
 
 
+def test_interest_exposure_uses_pv_basis_rate(workbook_data):
+    summary = build_asset_summary(workbook_data.kbqs, "资产类型")
+    fixed_income_product = summary[
+        summary["资产类型"] == "组合类保险资产管理产品-固定收益类"
+    ].iloc[0]
+    source_factor = workbook_data.interest_factor_table[
+        (workbook_data.interest_factor_table["资产类型"] == "组合类保险资产管理产品-固定收益类")
+        & (workbook_data.interest_factor_table["久期桶"] == "存量平均")
+    ].iloc[0]
+    expected_interest_exposure = fixed_income_product["认可价值"] * source_factor["PV口径抵减因子"]
+    assert fixed_income_product["利率风险暴露"] == pytest.approx(expected_interest_exposure)
+    assert fixed_income_product["利率风险暴露"] < fixed_income_product["认可价值"]
+    assert fixed_income_product["权益价格风险暴露"] == pytest.approx(fixed_income_product["认可价值"])
+
+
 def test_local_government_bond_increase_changes_minimum_capital(workbook_data):
     result = run_scenario(
         workbook_data,

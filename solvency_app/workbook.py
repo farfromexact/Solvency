@@ -258,36 +258,68 @@ def _enrich_interest_risk_from_mc_result(kbqs: pd.DataFrame, mc_result: pd.DataF
 
     enriched = kbqs.copy()
     by_account_asset = (
-        mc_result.groupby(["账户", "资产类型"], dropna=False)[["利率风险资产价值", "资产端利率风险MC"]]
+        mc_result.groupby(["账户", "资产类型"], dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
         .sum()
         .reset_index()
     )
-    by_account_asset["账户资产利率风险率"] = _safe_series_div(
+    by_account_asset["账户资产PV口径利率风险率"] = _safe_series_div(
+        by_account_asset["资产端利率风险MC"], by_account_asset["PV基础"]
+    )
+    by_account_asset["账户资产资产价值口径利率风险率"] = _safe_series_div(
         by_account_asset["资产端利率风险MC"], by_account_asset["利率风险资产价值"]
     )
 
     by_asset = (
-        mc_result.groupby("资产类型", dropna=False)[["利率风险资产价值", "资产端利率风险MC"]]
+        mc_result.groupby("资产类型", dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
         .sum()
         .reset_index()
     )
-    by_asset["资产类型利率风险率"] = _safe_series_div(
+    by_asset["资产类型PV口径利率风险率"] = _safe_series_div(
+        by_asset["资产端利率风险MC"], by_asset["PV基础"]
+    )
+    by_asset["资产类型资产价值口径利率风险率"] = _safe_series_div(
         by_asset["资产端利率风险MC"], by_asset["利率风险资产价值"]
     )
 
     enriched = enriched.merge(
-        by_account_asset[["账户", "资产类型", "账户资产利率风险率"]],
+        by_account_asset[
+            [
+                "账户",
+                "资产类型",
+                "账户资产PV口径利率风险率",
+                "账户资产资产价值口径利率风险率",
+            ]
+        ],
         on=["账户", "资产类型"],
         how="left",
     ).merge(
-        by_asset[["资产类型", "资产类型利率风险率"]],
+        by_asset[
+            [
+                "资产类型",
+                "资产类型PV口径利率风险率",
+                "资产类型资产价值口径利率风险率",
+            ]
+        ],
         on="资产类型",
         how="left",
     )
 
-    rate = enriched["账户资产利率风险率"].fillna(enriched["资产类型利率风险率"]).fillna(0.0)
+    rate = (
+        enriched["账户资产PV口径利率风险率"]
+        .fillna(enriched["资产类型PV口径利率风险率"])
+        .fillna(enriched["账户资产资产价值口径利率风险率"])
+        .fillna(enriched["资产类型资产价值口径利率风险率"])
+        .fillna(0.0)
+    )
     enriched["利率风险暴露"] = enriched["认可价值"] * rate
-    return enriched.drop(columns=["账户资产利率风险率", "资产类型利率风险率"])
+    return enriched.drop(
+        columns=[
+            "账户资产PV口径利率风险率",
+            "账户资产资产价值口径利率风险率",
+            "资产类型PV口径利率风险率",
+            "资产类型资产价值口径利率风险率",
+        ]
+    )
 
 
 def _read_account_capital_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
