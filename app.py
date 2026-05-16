@@ -68,7 +68,9 @@ def _render_baseline(data) -> None:
 
 def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment]:
     st.subheader("情景模块")
-    position_tab, price_tab, target_tab, base_tab = st.tabs(["加仓/减仓/建仓", "上涨/下跌", "目标倒推", "基准资产暴露"])
+    position_tab, price_tab, market_tab, target_tab, base_tab = st.tabs(
+        ["加仓/减仓/建仓", "上涨/下跌", "市场冲击", "目标倒推", "基准资产暴露"]
+    )
     adjustments: list[Adjustment] = []
 
     with position_tab:
@@ -79,6 +81,9 @@ def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment
         st.caption("用于模拟资产价格上涨或下跌。估值变动默认进入实际资本和核心资本，同时按暴露变化估算最低资本影响。")
         adjustments.extend(_render_adjustment_rows(data, mode_name="price", key_prefix="price"))
 
+    with market_tab:
+        adjustments.extend(_render_market_shock_controls(data))
+
     with target_tab:
         _render_target_solver(data, policy)
 
@@ -87,6 +92,196 @@ def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment
         st.dataframe(_display_money_df(summary), use_container_width=True, height=360)
 
     return adjustments
+
+
+EQUITY_MARKET_SHOCK_TYPES = [
+    "上市普通股票",
+    "优先股",
+    "证券投资基金-股票型",
+    "证券投资基金-混合型",
+    "组合类保险资产管理产品-权益类",
+    "组合类保险资产管理产品-混合类",
+]
+
+
+def _render_market_shock_controls(data) -> list[Adjustment]:
+    st.caption(
+        "用于模拟更接近市场的冲击：股市用统一涨跌幅；国债和地方政府债按久期 bucket 输入收益率变化(bp)。"
+        "利率 bp 为正表示收益率上行、价格下跌。"
+    )
+    equity_pct = st.number_input(
+        "股市涨跌%",
+        min_value=-100.0,
+        max_value=100.0,
+        value=0.0,
+        step=1.0,
+        key="market_equity_pct",
+    )
+    adjustments = _equity_market_shock_adjustments(data, float(equity_pct))
+    rows = []
+    if adjustments:
+        rows.extend(
+            {
+                "冲击类型": "股市涨跌",
+                "对象": item.member,
+                "久期桶": "",
+                "冲击": float(equity_pct),
+                "估算价格变化": item.change_amount,
+            }
+            for item in adjustments
+        )
+
+    st.markdown("##### 国债 / 地方政府债收益率冲击")
+    bond_shocks: dict[tuple[str, str], float] = {}
+    for asset_type, col in zip(["国债", "地方政府债"], st.columns(2)):
+        with col:
+            st.markdown(f"**{asset_type}**")
+            bucket_rows = _bond_bucket_rows(data, asset_type)
+            if bucket_rows.empty:
+                st.info("当前底稿无可用久期 bucket。")
+                continue
+            for _, row in bucket_rows.iterrows():
+                bucket = str(row["久期桶"])
+                bp = st.number_input(
+                    f"{bucket} bp",
+                    min_value=-300.0,
+                    max_value=300.0,
+                    value=0.0,
+                    step=1.0,
+                    format="%.1f",
+                    key=f"market_bp_{asset_type}_{bucket}",
+                )
+                bond_shocks[(asset_type, bucket)] = float(bp)
+    bond_adjustments, bond_summary = _bond_market_shock_adjustments(data, bond_shocks)
+    adjustments.extend(bond_adjustments)
+    if not bond_summary.empty:
+        rows.extend(bond_summary.to_dict("records"))
+
+    if rows:
+        st.dataframe(_display_market_shock_df(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
+    else:
+        st.info("当前没有非零市场冲击。")
+    return adjustments
+
+
+def _equity_market_shock_adjustments(data, pct: float) -> list[Adjustment]:
+    if pct == 0:
+        return []
+    summary = build_asset_summary(data.kbqs, "资产类型")
+    available = set(summary["资产类型"].astype(str))
+    adjustments = []
+    for asset_type in EQUITY_MARKET_SHOCK_TYPES:
+        if asset_type not in available:
+            continue
+        value = float(summary.loc[summary["资产类型"].astype(str) == asset_type, "认可价值"].sum())
+        if value == 0:
+            continue
+        adjustments.append(
+            Adjustment(
+                dimension="资产类型",
+                member=asset_type,
+                change_pct=0.0,
+                mode="price",
+                change_amount=value * pct / 100.0,
+            )
+        )
+    return adjustments
+
+
+def _bond_market_shock_adjustments(
+    data,
+    shock_bps: dict[tuple[str, str], float],
+) -> tuple[list[Adjustment], pd.DataFrame]:
+    adjustments = []
+    rows = []
+    for (asset_type, bucket), bp in shock_bps.items():
+        if bp == 0:
+            continue
+        scoped = _bond_bucket_rows(data, asset_type)
+        match = scoped[scoped["久期桶"].astype(str) == str(bucket)]
+        if match.empty:
+            continue
+        basis_value = float(match.iloc[0]["利率风险资产价值"])
+        duration = _duration_bucket_midpoint(bucket)
+        price_delta = -duration * bp / 10000.0 * basis_value
+        adjustments.append(
+            Adjustment(
+                dimension="资产类型",
+                member=asset_type,
+                change_pct=0.0,
+                mode="price",
+                change_amount=price_delta,
+                duration_bucket=bucket,
+            )
+        )
+        rows.append(
+            {
+                "冲击类型": "收益率bp",
+                "对象": asset_type,
+                "久期桶": bucket,
+                "冲击": bp,
+                "估算久期": duration,
+                "利率风险资产价值": basis_value,
+                "估算价格变化": price_delta,
+            }
+        )
+    return adjustments, pd.DataFrame(rows)
+
+
+def _bond_bucket_rows(data, asset_type: str) -> pd.DataFrame:
+    table = getattr(data, "interest_factor_table", pd.DataFrame())
+    if table.empty:
+        return pd.DataFrame()
+    scoped = table[
+        (table["资产类型"].astype(str) == asset_type)
+        & (table["久期桶"].astype(str) != "存量平均")
+        & (pd.to_numeric(table["利率风险资产价值"], errors="coerce").fillna(0.0) > 0)
+    ].copy()
+    if scoped.empty:
+        return scoped
+    scoped["排序"] = scoped["久期桶"].map(_duration_bucket_order)
+    return scoped.sort_values("排序")
+
+
+def _duration_bucket_midpoint(bucket: str) -> float:
+    mapping = {
+        "<3年": 1.5,
+        "3-5年": 4.0,
+        "5-7年": 6.0,
+        "7-10年": 8.5,
+        "10-15年": 12.5,
+        "15-30年": 22.5,
+        "30年以上": 30.0,
+    }
+    return mapping.get(str(bucket), 0.0)
+
+
+def _duration_bucket_order(bucket: str) -> int:
+    order = {
+        "<3年": 0,
+        "3-5年": 1,
+        "5-7年": 2,
+        "7-10年": 3,
+        "10-15年": 4,
+        "15-30年": 5,
+        "30年以上": 6,
+    }
+    return order.get(str(bucket), 99)
+
+
+def _display_market_shock_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["估算价格变化", "利率风险资产价值"]:
+        if col in out.columns:
+            out[col] = out[col].map(lambda value: "" if pd.isna(value) else _fmt_money(float(value)))
+    if "冲击" in out.columns:
+        out["冲击"] = out.apply(
+            lambda row: f"{float(row['冲击']):+.2f}%" if row["冲击类型"] == "股市涨跌" else f"{float(row['冲击']):+.1f} bp",
+            axis=1,
+        )
+    if "估算久期" in out.columns:
+        out["估算久期"] = out["估算久期"].map(lambda value: "" if pd.isna(value) else f"{float(value):.1f}")
+    return out
 
 
 def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjustment]:

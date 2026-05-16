@@ -330,6 +330,33 @@ def test_waterfall_decomposition_matches_scenario_result(workbook_data):
     )
 
 
+def test_bond_market_shock_uses_bucket_duration_and_bp_sign(workbook_data):
+    from app import _bond_market_shock_adjustments
+
+    adjustments, summary = _bond_market_shock_adjustments(
+        workbook_data,
+        {("国债", "15-30年"): 10.0},
+    )
+    assert len(adjustments) == 1
+    assert adjustments[0].member == "国债"
+    assert adjustments[0].duration_bucket == "15-30年"
+    assert adjustments[0].mode == "price"
+    assert adjustments[0].change_amount < 0
+    assert summary.iloc[0]["估算久期"] == pytest.approx(22.5)
+    assert summary.iloc[0]["估算价格变化"] == pytest.approx(adjustments[0].change_amount)
+
+
+def test_equity_market_shock_creates_price_adjustments(workbook_data):
+    from app import _equity_market_shock_adjustments
+
+    adjustments = _equity_market_shock_adjustments(workbook_data, -5.0)
+    members = {item.member for item in adjustments}
+    assert "上市普通股票" in members
+    assert "证券投资基金-股票型" in members
+    assert all(item.mode == "price" for item in adjustments)
+    assert all(item.change_amount < 0 for item in adjustments)
+
+
 def test_missing_workbook_raises_clear_error():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
