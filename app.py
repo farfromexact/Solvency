@@ -579,10 +579,10 @@ def _render_detail_tabs(data, result) -> None:
         st.info("利率风险情景不再把固收资产简单作为正向暴露处理；新增国债、地方政府债等会按资产端利率风险抵减因子降低寿险利率风险最低资本。")
         st.dataframe(_display_money_df(result.exposure_summary), use_container_width=True, hide_index=True)
     with tabs[5]:
-        st.dataframe(_display_money_df(data.account_capital), use_container_width=True, hide_index=True)
+        st.dataframe(_display_report_money_df(data.account_capital), use_container_width=True, hide_index=True)
     with tabs[6]:
-        st.dataframe(_display_money_df(data.s01), use_container_width=True, hide_index=True)
-        st.dataframe(_display_money_df(data.s05), use_container_width=True, hide_index=True)
+        st.dataframe(_display_report_money_df(data.s01), use_container_width=True, hide_index=True)
+        st.dataframe(_display_report_money_df(data.s05), use_container_width=True, hide_index=True)
 
 
 def _render_waterfall_analysis(result) -> None:
@@ -780,6 +780,26 @@ def _display_money_df(df: pd.DataFrame) -> pd.DataFrame:
                 out[col] = out[col].map(_fmt_pct)
             else:
                 out[col] = out[col].map(_fmt_money)
+    return out
+
+
+def _display_report_money_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = _dedupe_columns(df.copy())
+    text_columns = {"行次", "项目"}
+    item_series = out["项目"].astype(str) if "项目" in out.columns else pd.Series("", index=out.index)
+    ratio_rows = item_series.str.contains("充足率|比率|比例", na=False)
+    for col in out.columns:
+        if str(col) in text_columns:
+            continue
+        numeric = pd.to_numeric(out[col], errors="coerce")
+        if numeric.notna().sum() == 0:
+            continue
+        formatted = out[col].astype(object)
+        money_mask = numeric.notna() & ~ratio_rows
+        pct_mask = numeric.notna() & ratio_rows
+        formatted.loc[money_mask] = numeric.loc[money_mask].map(_fmt_money)
+        formatted.loc[pct_mask] = numeric.loc[pct_mask].map(_fmt_pct)
+        out[col] = formatted
     return out
 
 
