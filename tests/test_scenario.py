@@ -313,6 +313,23 @@ def test_target_solver_zero_change_returns_zero_amount(workbook_data):
     assert result.change_pct == 0
 
 
+def test_waterfall_decomposition_matches_scenario_result(workbook_data):
+    from app import _build_capital_waterfall, _build_ratio_waterfall
+
+    result = run_scenario(
+        workbook_data,
+        [Adjustment(dimension="资产类型", member="上市普通股票", change_pct=-10.0)],
+    )
+    ratio = _build_ratio_waterfall(result, "综合偿付能力充足率")
+    capital = _build_capital_waterfall(result)
+    assert ratio.iloc[-1]["标签位置"] == pytest.approx(
+        result.scenario["综合偿付能力充足率"] * 100.0
+    )
+    assert capital.iloc[-1]["标签位置"] == pytest.approx(
+        result.scenario["最低资本"] / 100000000.0
+    )
+
+
 def test_missing_workbook_raises_clear_error():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:

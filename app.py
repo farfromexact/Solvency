@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -361,24 +362,203 @@ def _render_result(result) -> None:
 
 
 def _render_detail_tabs(data, result) -> None:
-    tabs = st.tabs(["情景输入", "贡献分析", "因子假设", "暴露变化", "分账户资本", "原始报表"])
+    tabs = st.tabs(["情景输入", "瀑布分析", "贡献分析", "因子假设", "暴露变化", "分账户资本", "原始报表"])
     with tabs[0]:
         if result.adjustment_summary.empty:
             st.info("当前没有非零情景调整。")
         else:
             st.dataframe(_display_money_df(result.adjustment_summary), use_container_width=True, hide_index=True)
     with tabs[1]:
-        st.dataframe(_display_money_df(result.contribution_summary), use_container_width=True, hide_index=True)
+        _render_waterfall_analysis(result)
     with tabs[2]:
-        st.dataframe(_display_rate_df(result.risk_rates), use_container_width=True, hide_index=True)
+        st.dataframe(_display_money_df(result.contribution_summary), use_container_width=True, hide_index=True)
     with tabs[3]:
+        st.dataframe(_display_rate_df(result.risk_rates), use_container_width=True, hide_index=True)
+    with tabs[4]:
         st.info("利率风险情景不再把固收资产简单作为正向暴露处理；新增国债、地方政府债等会按资产端利率风险抵减因子降低寿险利率风险最低资本。")
         st.dataframe(_display_money_df(result.exposure_summary), use_container_width=True, hide_index=True)
-    with tabs[4]:
-        st.dataframe(_display_money_df(data.account_capital), use_container_width=True, hide_index=True)
     with tabs[5]:
+        st.dataframe(_display_money_df(data.account_capital), use_container_width=True, hide_index=True)
+    with tabs[6]:
         st.dataframe(_display_money_df(data.s01), use_container_width=True, hide_index=True)
         st.dataframe(_display_money_df(data.s05), use_container_width=True, hide_index=True)
+
+
+def _render_waterfall_analysis(result) -> None:
+    metric = st.radio(
+        "充足率指标",
+        ["综合偿付能力充足率", "核心偿付能力充足率"],
+        horizontal=True,
+        key="waterfall_metric",
+    )
+    ratio_df = _build_ratio_waterfall(result, metric)
+    capital_df = _build_capital_waterfall(result)
+    st.subheader("充足率变化拆解")
+    st.altair_chart(_waterfall_chart(ratio_df, "百分点"), use_container_width=True)
+    st.dataframe(_display_waterfall_df(ratio_df, "pct"), use_container_width=True, hide_index=True)
+
+    st.subheader("最低资本变化拆解")
+    st.altair_chart(_waterfall_chart(capital_df, "亿元"), use_container_width=True)
+    st.dataframe(_display_waterfall_df(capital_df, "money"), use_container_width=True, hide_index=True)
+
+    st.subheader("风险子项贡献排名")
+    ranking = _risk_contribution_ranking(result.contribution_summary)
+    if ranking.empty:
+        st.info("当前情景没有风险子项最低资本变化。")
+    else:
+        st.altair_chart(_ranking_chart(ranking), use_container_width=True)
+        st.dataframe(_display_money_df(ranking), use_container_width=True, hide_index=True)
+
+
+def _build_ratio_waterfall(result, metric: str) -> pd.DataFrame:
+    numerator_key = "实际资本" if metric == "综合偿付能力充足率" else "核心资本"
+    baseline_numerator = float(result.baseline[numerator_key])
+    scenario_numerator = float(result.scenario[numerator_key])
+    baseline_minimum = float(result.baseline["最低资本"])
+    scenario_minimum = float(result.scenario["最低资本"])
+    baseline_ratio = float(result.baseline[metric]) * 100.0
+    capital_only_ratio = _safe_div(scenario_numerator, baseline_minimum) * 100.0
+    scenario_ratio = float(result.scenario[metric]) * 100.0
+    rows = [
+        ("基准充足率", "total", baseline_ratio),
+        ("资本变化影响", "relative", capital_only_ratio - baseline_ratio),
+        ("最低资本变化影响", "relative", scenario_ratio - capital_only_ratio),
+        ("情景充足率", "total", scenario_ratio),
+    ]
+    return _waterfall_steps(rows)
+
+
+def _build_capital_waterfall(result) -> pd.DataFrame:
+    baseline_minimum = float(result.baseline["最低资本"])
+    scenario_minimum = float(result.scenario["最低资本"])
+    summary = result.contribution_summary
+    market_delta = _risk_delta(summary, "市场风险合计")
+    credit_delta = _risk_delta(summary, "信用风险合计")
+    residual = scenario_minimum - baseline_minimum - market_delta - credit_delta
+    rows = [
+        ("基准最低资本", "total", baseline_minimum / 100000000.0),
+        ("市场风险变化", "relative", market_delta / 100000000.0),
+        ("信用风险变化", "relative", credit_delta / 100000000.0),
+        ("相关矩阵/乘数等", "relative", residual / 100000000.0),
+        ("情景最低资本", "total", scenario_minimum / 100000000.0),
+    ]
+    return _waterfall_steps(rows)
+
+
+def _waterfall_steps(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
+    cumulative = 0.0
+    out = []
+    for idx, (label, kind, value) in enumerate(rows):
+        if kind == "total":
+            start = 0.0
+            end = value
+            cumulative = value
+        else:
+            start = cumulative
+            end = cumulative + value
+            cumulative = end
+        out.append(
+            {
+                "序号": idx,
+                "项目": label,
+                "类型": kind,
+                "变化": value,
+                "起点": min(start, end),
+                "终点": max(start, end),
+                "标签位置": end,
+                "标签": f"{value:,.2f}" if kind == "total" else f"{value:+,.2f}",
+                "方向": "合计" if kind == "total" else "增加" if value >= 0 else "减少",
+            }
+        )
+    return pd.DataFrame(out)
+
+
+def _waterfall_chart(df: pd.DataFrame, unit_label: str) -> alt.Chart:
+    order = df["项目"].tolist()
+    bars = (
+        alt.Chart(df)
+        .mark_bar(size=46)
+        .encode(
+            x=alt.X("项目:N", sort=order, title=None),
+            y=alt.Y("起点:Q", title=unit_label),
+            y2="终点:Q",
+            color=alt.Color(
+                "方向:N",
+                scale=alt.Scale(
+                    domain=["增加", "减少", "合计"],
+                    range=["#d8efe0", "#f4d6d6", "#d9e2f2"],
+                ),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("项目:N"),
+                alt.Tooltip("变化:Q", format=",.2f"),
+                alt.Tooltip("方向:N"),
+            ],
+        )
+    )
+    labels = (
+        alt.Chart(df)
+        .mark_text(dy=-8, fontSize=12, color="#31333f")
+        .encode(
+            x=alt.X("项目:N", sort=order),
+            y=alt.Y("终点:Q"),
+            text=alt.Text("标签:N"),
+        )
+    )
+    return (bars + labels).properties(height=320)
+
+
+def _ranking_chart(df: pd.DataFrame) -> alt.Chart:
+    chart_df = df.copy()
+    chart_df["变化亿元"] = chart_df["最低资本变化"] / 100000000.0
+    chart_df = chart_df.sort_values("变化亿元")
+    return (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("风险类型:N", sort=chart_df["风险类型"].tolist(), title=None),
+            x=alt.X("变化亿元:Q", title="亿元"),
+            color=alt.condition(
+                alt.datum["变化亿元"] >= 0,
+                alt.value("#d8efe0"),
+                alt.value("#f4d6d6"),
+            ),
+            tooltip=[
+                alt.Tooltip("风险类型:N"),
+                alt.Tooltip("变化亿元:Q", format=",.2f"),
+            ],
+        )
+        .properties(height=300)
+    )
+
+
+def _risk_contribution_ranking(summary: pd.DataFrame) -> pd.DataFrame:
+    out = summary[~summary["风险类型"].astype(str).str.endswith("合计")].copy()
+    out = out[out["最低资本变化"].abs() > 1e-6]
+    if out.empty:
+        return out
+    return out.sort_values("最低资本变化", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+
+
+def _risk_delta(summary: pd.DataFrame, risk_type: str) -> float:
+    match = summary.loc[summary["风险类型"] == risk_type, "最低资本变化"]
+    if match.empty:
+        return 0.0
+    return float(match.iloc[0])
+
+
+def _display_waterfall_df(df: pd.DataFrame, unit: str) -> pd.DataFrame:
+    out = df[["项目", "类型", "变化", "标签位置"]].copy()
+    if unit == "pct":
+        out["变化"] = out["变化"].map(lambda value: f"{value:+.2f} pct")
+        out["标签位置"] = out["标签位置"].map(lambda value: f"{value:.2f}%")
+        out = out.rename(columns={"标签位置": "结果"})
+    else:
+        out["变化"] = out["变化"].map(lambda value: f"{value:+,.2f} 亿元")
+        out["标签位置"] = out["标签位置"].map(lambda value: f"{value:,.2f} 亿元")
+        out = out.rename(columns={"标签位置": "结果"})
+    return out
 
 
 def _format_metric_comparison(df: pd.DataFrame) -> pd.DataFrame:
@@ -428,6 +608,12 @@ def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _is_ratio_column(column_name: str) -> bool:
     ratio_names = ("充足率", "变化率", "变化比例", "所需变化比例", "单位资本率")
     return any(name in column_name for name in ratio_names)
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
 
 
 def _fmt_money(value: float) -> str:
