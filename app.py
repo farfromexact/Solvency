@@ -94,14 +94,14 @@ def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment
     return adjustments
 
 
-EQUITY_MARKET_SHOCK_TYPES = [
-    "上市普通股票",
-    "优先股",
-    "证券投资基金-股票型",
-    "证券投资基金-混合型",
-    "组合类保险资产管理产品-权益类",
-    "组合类保险资产管理产品-混合类",
-]
+EQUITY_MARKET_SHOCK_BETAS = {
+    "上市普通股票": 1.0,
+    "优先股": 1.0,
+    "证券投资基金-股票型": 1.0,
+    "证券投资基金-混合型": 0.7,
+    "组合类保险资产管理产品-权益类": 1.0,
+    "组合类保险资产管理产品-混合类": 0.7,
+}
 
 
 def _render_market_shock_controls(data) -> list[Adjustment]:
@@ -125,7 +125,7 @@ def _render_market_shock_controls(data) -> list[Adjustment]:
                 "冲击类型": "股市涨跌",
                 "对象": item.member,
                 "久期桶": "",
-                "冲击": float(equity_pct),
+                "冲击": float(equity_pct) * EQUITY_MARKET_SHOCK_BETAS.get(item.member, 1.0),
                 "估算价格变化": item.change_amount,
             }
             for item in adjustments
@@ -170,7 +170,7 @@ def _equity_market_shock_adjustments(data, pct: float) -> list[Adjustment]:
     summary = build_asset_summary(data.kbqs, "资产类型")
     available = set(summary["资产类型"].astype(str))
     adjustments = []
-    for asset_type in EQUITY_MARKET_SHOCK_TYPES:
+    for asset_type, beta in EQUITY_MARKET_SHOCK_BETAS.items():
         if asset_type not in available:
             continue
         value = float(summary.loc[summary["资产类型"].astype(str) == asset_type, "认可价值"].sum())
@@ -182,7 +182,7 @@ def _equity_market_shock_adjustments(data, pct: float) -> list[Adjustment]:
                 member=asset_type,
                 change_pct=0.0,
                 mode="price",
-                change_amount=value * pct / 100.0,
+                change_amount=value * pct * beta / 100.0,
             )
         )
     return adjustments

@@ -348,6 +348,7 @@ def test_bond_market_shock_uses_bucket_duration_and_bp_sign(workbook_data):
 
 def test_equity_market_shock_creates_price_adjustments(workbook_data):
     from app import _equity_market_shock_adjustments
+    from solvency_app.scenario import build_asset_summary
 
     adjustments = _equity_market_shock_adjustments(workbook_data, -5.0)
     members = {item.member for item in adjustments}
@@ -355,6 +356,11 @@ def test_equity_market_shock_creates_price_adjustments(workbook_data):
     assert "证券投资基金-股票型" in members
     assert all(item.mode == "price" for item in adjustments)
     assert all(item.change_amount < 0 for item in adjustments)
+
+    summary = build_asset_summary(workbook_data.kbqs, "资产类型")
+    mixed_fund_value = float(summary.loc[summary["资产类型"] == "证券投资基金-混合型", "认可价值"].sum())
+    mixed_fund_adjustment = next(item for item in adjustments if item.member == "证券投资基金-混合型")
+    assert mixed_fund_adjustment.change_amount == pytest.approx(mixed_fund_value * -0.035)
 
 
 def test_missing_workbook_raises_clear_error():
