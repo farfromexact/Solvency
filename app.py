@@ -13,6 +13,7 @@ from solvency_app.workbook import WorkbookValidationError, load_workbook_data
 
 
 st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")
+WORKBOOK_CACHE_VERSION = 2
 
 
 def main() -> None:
@@ -26,7 +27,7 @@ def main() -> None:
     st.caption(f"当前底稿：{source.name}")
 
     try:
-        data = _load_data(source)
+        data = _load_data(source, source.stat().st_mtime_ns, WORKBOOK_CACHE_VERSION)
     except WorkbookValidationError as exc:
         st.error(str(exc))
         return
@@ -43,7 +44,7 @@ def main() -> None:
 
 
 @st.cache_data(show_spinner="正在解析底稿...")
-def _load_data(source):
+def _load_data(source, _mtime_ns: int, _cache_version: int):
     return load_workbook_data(source)
 
 
