@@ -89,7 +89,8 @@ def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment
 
     with base_tab:
         summary = build_asset_summary(data.kbqs, "资产类型")
-        st.dataframe(_display_money_df(summary), use_container_width=True, height=360)
+        sortable_summary, column_config = _sortable_money_df(summary)
+        st.dataframe(sortable_summary, column_config=column_config, use_container_width=True, height=360)
 
     return adjustments
 
@@ -124,7 +125,7 @@ def _render_market_shock_controls(data) -> list[Adjustment]:
             {
                 "冲击类型": "股市涨跌",
                 "对象": item.member,
-                "久期桶": "",
+                "久期桶": "不适用",
                 "冲击": float(equity_pct) * EQUITY_MARKET_SHOCK_BETAS.get(item.member, 1.0),
                 "估算价格变化": item.change_amount,
             }
@@ -562,7 +563,11 @@ def _render_detail_tabs(data, result) -> None:
         if result.adjustment_summary.empty:
             st.info("当前没有非零情景调整。")
         else:
-            st.dataframe(_display_money_df(result.adjustment_summary), use_container_width=True, hide_index=True)
+            st.dataframe(
+                _display_adjustment_summary(data, result.adjustment_summary),
+                use_container_width=True,
+                hide_index=True,
+            )
     with tabs[1]:
         _render_waterfall_analysis(result)
     with tabs[2]:
@@ -775,6 +780,31 @@ def _display_money_df(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 out[col] = out[col].map(_fmt_money)
     return out
+
+
+def _display_adjustment_summary(data, df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if {"对象", "久期桶"}.issubset(out.columns):
+        out["久期桶"] = out.apply(
+            lambda row: row["久期桶"] if _duration_options(data, str(row["对象"])) else "不适用",
+            axis=1,
+        )
+    return _display_money_df(out)
+
+
+def _sortable_money_df(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, st.column_config.Column]]:
+    out = _dedupe_columns(df.copy())
+    column_config: dict[str, st.column_config.Column] = {}
+    for col in out.columns:
+        if not pd.api.types.is_numeric_dtype(out[col]):
+            continue
+        if _is_ratio_column(str(col)):
+            out[col] = out[col] * 100.0
+            column_config[col] = st.column_config.NumberColumn(format="%.2f%%")
+        else:
+            out[col] = out[col] / 100000000.0
+            column_config[col] = st.column_config.NumberColumn(format="%.2f 亿元")
+    return out, column_config
 
 
 def _display_rate_df(df: pd.DataFrame) -> pd.DataFrame:

@@ -363,6 +363,34 @@ def test_equity_market_shock_creates_price_adjustments(workbook_data):
     assert mixed_fund_adjustment.change_amount == pytest.approx(mixed_fund_value * -0.035)
 
 
+def test_adjustment_summary_marks_non_bond_duration_not_applicable(workbook_data):
+    from app import _display_adjustment_summary
+
+    result = run_scenario(
+        workbook_data,
+        [
+            Adjustment(dimension="资产类型", member="上市普通股票", change_pct=2.0, mode="price"),
+            Adjustment(dimension="资产类型", member="地方政府债", change_pct=-1.0, mode="price", duration_bucket="15-30年"),
+        ],
+    )
+    display = _display_adjustment_summary(workbook_data, result.adjustment_summary)
+    stock_bucket = display.loc[display["对象"] == "上市普通股票", "久期桶"].iloc[0]
+    bond_bucket = display.loc[display["对象"] == "地方政府债", "久期桶"].iloc[0]
+    assert stock_bucket == "不适用"
+    assert bond_bucket == "15-30年"
+
+
+def test_sortable_money_df_keeps_numeric_money_columns_for_sorting(workbook_data):
+    from app import _sortable_money_df
+
+    summary = build_asset_summary(workbook_data.kbqs, "资产类型")
+    display, _ = _sortable_money_df(summary)
+    assert pd.api.types.is_numeric_dtype(display["利率风险暴露"])
+    local_government_value = summary.loc[summary["资产类型"] == "地方政府债", "利率风险暴露"].iloc[0]
+    local_government_display = display.loc[display["资产类型"] == "地方政府债", "利率风险暴露"].iloc[0]
+    assert local_government_display == pytest.approx(local_government_value / 100000000.0)
+
+
 def test_missing_workbook_raises_clear_error():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
