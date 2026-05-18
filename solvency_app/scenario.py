@@ -22,6 +22,8 @@ NUMERIC_COLUMNS = [
     "汇率风险暴露",
 ]
 
+RISK_EXPOSURE_COLUMNS = NUMERIC_COLUMNS[1:]
+
 PRICE_MOVE_COLUMNS = NUMERIC_COLUMNS
 
 MARKET_ITEMS = {
@@ -118,12 +120,12 @@ class RiskFactors:
 FACTOR_ASSUMPTIONS = [
     ("债券基金/固收产品", "债券型基金、固定收益类资管产品", RiskFactors(equity=0.06, category="债券基金/固收产品")),
     ("上市股票", "上市普通股票", RiskFactors(equity=0.3516, category="上市股票")),
-    ("股票/混合基金", "股票型基金、混合型基金", RiskFactors(equity=0.2587, category="股票/混合基金")),
+    ("股票/混合基金", "股票型基金、混合型基金、权益类/混合类资管产品", RiskFactors(equity=0.2587, category="股票/混合基金")),
     ("未上市股权", "未上市股权、长期股权投资", RiskFactors(equity=0.41, category="未上市股权")),
     ("股权投资基金", "股权投资基金", RiskFactors(equity=0.451, category="股权投资基金")),
     ("债权投资计划", "基础设施/不动产债权投资计划", RiskFactors(counterparty=0.093, category="债权投资计划")),
     ("信托计划", "固定收益类信托计划", RiskFactors(counterparty=0.095, category="信托计划")),
-    ("不动产", "不动产项目公司股权、不动产金融产品、REITs等", RiskFactors(real_estate=0.18, category="不动产")),
+    ("不动产", "不动产项目公司股权、投资性房地产物权、不动产金融产品、REITs等", RiskFactors(real_estate=0.18, category="不动产")),
 ]
 
 
@@ -244,7 +246,14 @@ def _calculate_capital_deltas(
     direct = {name: 0.0 for name in [*MARKET_ITEMS, *CREDIT_ITEMS]}
     if not adjustment_summary.empty:
         for _, row in adjustment_summary.iterrows():
-            direct = _add_risk_delta_from_adjustment(kbqs, row, direct, interest_factor_table, spread_factor_table)
+            direct = _add_risk_delta_from_adjustment(
+                kbqs,
+                row,
+                direct,
+                capital_lookup,
+                interest_factor_table,
+                spread_factor_table,
+            )
 
     base_market = _vector_from_lookup(capital_lookup, MARKET_ITEMS)
     scenario_market = base_market.copy()
@@ -274,6 +283,7 @@ def _add_risk_delta_from_adjustment(
     kbqs: pd.DataFrame,
     adjustment: pd.Series,
     direct: dict[str, float],
+    capital_lookup: dict[str, float],
     interest_factor_table: pd.DataFrame,
     spread_factor_table: pd.DataFrame,
 ) -> dict[str, float]:
@@ -286,15 +296,19 @@ def _add_risk_delta_from_adjustment(
         return out
 
     mask = kbqs[dimension].astype(str) == member
-    scoped = kbqs.loc[mask, [ASSET_TYPE_COL, VALUE_COL]].copy()
+    scoped = kbqs.loc[mask, [ASSET_TYPE_COL, *NUMERIC_COLUMNS]].copy()
     total = float(scoped[VALUE_COL].sum())
     if total <= 0:
         return out
 
-    by_type = scoped.groupby(ASSET_TYPE_COL, dropna=False)[VALUE_COL].sum()
-    for asset_type, base_value in by_type.items():
+    by_type = scoped.groupby(ASSET_TYPE_COL, dropna=False)[NUMERIC_COLUMNS].sum()
+    exposure_unit_rates = _exposure_unit_capital_rates(kbqs, capital_lookup)
+    for asset_type, exposure_row in by_type.iterrows():
+        base_value = float(exposure_row[VALUE_COL])
         delta = value_delta * float(base_value) / total
         factors = _factors_for_asset_type(str(asset_type), duration_bucket, interest_factor_table, spread_factor_table)
+        if not _has_risk_factor(factors):
+            factors = _fallback_factors_from_exposure(exposure_row, exposure_unit_rates)
         # 寿险利率风险按净现金流情景法计量，新增固收资产现金流是对负债端利率风险的抵减。
         out["利率风险"] -= delta * factors.interest_hedge
         out["利差风险"] += delta * factors.spread
@@ -303,6 +317,55 @@ def _add_risk_delta_from_adjustment(
         out["房地产价格风险"] += delta * factors.real_estate
         out["汇率风险"] += delta * factors.fx
     return out
+
+
+def _has_risk_factor(factors: RiskFactors) -> bool:
+    return any(
+        abs(value) > 0
+        for value in [
+            factors.interest_hedge,
+            factors.spread,
+            factors.counterparty,
+            factors.equity,
+            factors.real_estate,
+            factors.fx,
+        ]
+    )
+
+
+def _exposure_unit_capital_rates(kbqs: pd.DataFrame, capital_lookup: dict[str, float]) -> dict[str, float]:
+    return {
+        "利差风险暴露": _risk_unit_rate(kbqs, "利差风险暴露", _lookup_capital(capital_lookup, CREDIT_ITEMS["利差风险"])),
+        "交易对手风险暴露": _risk_unit_rate(kbqs, "交易对手风险暴露", _lookup_capital(capital_lookup, CREDIT_ITEMS["交易对手违约风险"])),
+        "权益价格风险暴露": _risk_unit_rate(kbqs, "权益价格风险暴露", _lookup_capital(capital_lookup, MARKET_ITEMS["权益价格风险"])),
+        "房地产风险暴露": _risk_unit_rate(kbqs, "房地产风险暴露", _lookup_capital(capital_lookup, MARKET_ITEMS["房地产价格风险"])),
+        "汇率风险暴露": _risk_unit_rate(kbqs, "汇率风险暴露", _lookup_capital(capital_lookup, MARKET_ITEMS["汇率风险"])),
+    }
+
+
+def _risk_unit_rate(kbqs: pd.DataFrame, exposure_col: str, risk_capital: float) -> float:
+    exposure = float(kbqs[exposure_col].sum()) if exposure_col in kbqs.columns else 0.0
+    return _safe_div(risk_capital, exposure)
+
+
+def _fallback_factors_from_exposure(exposure_row: pd.Series, exposure_unit_rates: dict[str, float]) -> RiskFactors:
+    value = float(exposure_row.get(VALUE_COL, 0.0) or 0.0)
+    if value <= 0:
+        return RiskFactors()
+    return RiskFactors(
+        interest_hedge=_safe_div(float(exposure_row.get("利率风险暴露", 0.0) or 0.0), value),
+        spread=_safe_div(float(exposure_row.get("利差风险暴露", 0.0) or 0.0), value)
+        * exposure_unit_rates.get("利差风险暴露", 0.0),
+        counterparty=_safe_div(float(exposure_row.get("交易对手风险暴露", 0.0) or 0.0), value)
+        * exposure_unit_rates.get("交易对手风险暴露", 0.0),
+        equity=_safe_div(float(exposure_row.get("权益价格风险暴露", 0.0) or 0.0), value)
+        * exposure_unit_rates.get("权益价格风险暴露", 0.0),
+        real_estate=_safe_div(float(exposure_row.get("房地产风险暴露", 0.0) or 0.0), value)
+        * exposure_unit_rates.get("房地产风险暴露", 0.0),
+        fx=_safe_div(float(exposure_row.get("汇率风险暴露", 0.0) or 0.0), value)
+        * exposure_unit_rates.get("汇率风险暴露", 0.0),
+        category="底稿风险暴露兜底",
+    )
 
 
 def _factors_for_asset_type(
@@ -325,7 +388,7 @@ def _factors_for_asset_type(
         return RiskFactors(equity=0.06, category="债券基金/固收产品")
     if "上市普通股票" in asset_type or asset_type == "优先股":
         return RiskFactors(equity=0.3516, category="上市股票")
-    if "股票型" in asset_type or "混合型" in asset_type:
+    if any(key in asset_type for key in ["股票型", "混合型", "权益类", "混合类"]):
         return RiskFactors(equity=0.2587, category="股票/混合基金")
     if "股权投资基金" in asset_type:
         return RiskFactors(equity=0.451, category="股权投资基金")
@@ -335,7 +398,7 @@ def _factors_for_asset_type(
         return RiskFactors(counterparty=0.095, category="信托计划")
     if "债权投资计划" in asset_type:
         return RiskFactors(counterparty=0.093, category="债权投资计划")
-    if any(key in asset_type for key in ["不动产", "基础设施证券投资基金", "REIT"]):
+    if any(key in asset_type for key in ["不动产", "投资性房地产", "房地产物权", "基础设施证券投资基金", "REIT"]):
         return RiskFactors(real_estate=0.18, category="不动产")
     return RiskFactors()
 

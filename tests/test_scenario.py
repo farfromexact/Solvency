@@ -48,6 +48,49 @@ def test_equity_asset_increase_raises_minimum_capital(workbook_data):
     assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
 
 
+@pytest.mark.parametrize(
+    "asset_type",
+    [
+        "组合类保险资产管理产品-权益类",
+        "组合类保险资产管理产品-混合类",
+    ],
+)
+def test_equity_asset_management_products_raise_minimum_capital(workbook_data, asset_type):
+    result = run_scenario(
+        workbook_data,
+        [Adjustment(dimension="资产类型", member=asset_type, change_pct=10.0)],
+    )
+    assert result.scenario["最低资本"] > result.baseline["最低资本"]
+    assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
+
+
+def test_investment_property_rights_raise_minimum_capital(workbook_data):
+    result = run_scenario(
+        workbook_data,
+        [Adjustment(dimension="资产类型", member="投资性房地产物权", change_pct=10.0)],
+    )
+    assert result.scenario["最低资本"] > result.baseline["最低资本"]
+    assert result.scenario["综合偿付能力充足率"] < result.baseline["综合偿付能力充足率"]
+
+
+@pytest.mark.parametrize(
+    "asset_type",
+    [
+        "贷款资产",
+        "买入返售金融资产",
+        "证券投资基金-货币市场",
+        "组合类保险资产管理产品-货币市场类",
+        "无固定期限资本债券",
+    ],
+)
+def test_unmapped_assets_with_baseline_exposure_use_fallback_risk_factors(workbook_data, asset_type):
+    result = run_scenario(
+        workbook_data,
+        [Adjustment(dimension="资产类型", member=asset_type, change_pct=10.0)],
+    )
+    assert result.scenario["最低资本"] != pytest.approx(result.baseline["最低资本"])
+
+
 def test_account_level_adjustment_stays_account_scoped(workbook_data):
     account_summary = build_asset_summary(workbook_data.kbqs, "账户")
     account_member = str(account_summary.iloc[0]["账户"])
