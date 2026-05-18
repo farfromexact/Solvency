@@ -19,6 +19,7 @@ WORKBOOK_CACHE_VERSION = 2
 def main() -> None:
     st.title("偿付能力资产配置情景测算")
     st.caption("基于现有底稿反推口径的情景估算，不替代监管报送系统或完整偿二代复算引擎。")
+    st.caption("风险模型：包含权益类/混合类资管产品映射和底稿风险暴露兜底。")
 
     source = _resolve_default_workbook()
     if source is None:
@@ -555,6 +556,9 @@ def _render_result(result) -> None:
     cols[2].metric("情景核心充足率", _fmt_pct(result.scenario["核心偿付能力充足率"]), _fmt_pct_delta(result.scenario["核心偿付能力充足率"] - result.baseline["核心偿付能力充足率"]))
     cols[3].metric("情景综合充足率", _fmt_pct(result.scenario["综合偿付能力充足率"]), _fmt_pct_delta(result.scenario["综合偿付能力充足率"] - result.baseline["综合偿付能力充足率"]))
     cols[4].metric("量化最低资本", _fmt_money(result.scenario["量化风险最低资本"]), _fmt_money(result.scenario["量化风险最低资本"] - result.baseline["量化风险最低资本"]))
+    if not result.adjustment_summary.empty:
+        st.caption("本次非零情景调整")
+        st.dataframe(_display_money_df(result.adjustment_summary), use_container_width=True, hide_index=True)
     st.dataframe(_format_metric_comparison(comparison), use_container_width=True, hide_index=True)
 
 
