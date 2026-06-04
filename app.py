@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -9,11 +7,19 @@ import streamlit as st
 from solvency_app.policies import load_policy_overlays
 from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summary, run_scenario
 from solvency_app.target import solve_target_change
-from solvency_app.workbook import WorkbookValidationError, load_workbook_data
+from solvency_app.workbook import (
+    WorkbookSource,
+    WorkbookValidationError,
+    discover_workbook_sources,
+    find_workbook_source,
+    latest_workbook_source,
+    load_baseline_metrics,
+    load_workbook_data,
+)
 
 
 st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")
-WORKBOOK_CACHE_VERSION = 2
+WORKBOOK_CACHE_VERSION = 3
 
 
 def main() -> None:
@@ -21,14 +27,17 @@ def main() -> None:
     st.caption("基于现有底稿反推口径的情景估算，不替代监管报送系统或完整偿二代复算引擎。")
     st.caption("风险模型：包含权益类/混合类资管产品映射和底稿风险暴露兜底。")
 
-    source = _resolve_default_workbook()
-    if source is None:
-        st.error("当前目录没有找到唯一的 Excel 底稿。请在 repo 根目录只保留一个 .xlsx 底稿文件。")
+    sources = discover_workbook_sources()
+    if not sources:
+        st.error("origin stats 目录下没有找到可用的月度 Excel 底稿。")
         return
-    st.caption(f"当前底稿：{source.name}")
+
+    source = _render_workbook_selector(sources)
+    _sync_selected_workbook_state(source)
+    history_df, history_errors = _load_history_metrics(_history_source_specs(sources), WORKBOOK_CACHE_VERSION)
 
     try:
-        data = _load_data(source, source.stat().st_mtime_ns, WORKBOOK_CACHE_VERSION)
+        data = _load_data(source.path, source.modified_time_ns, WORKBOOK_CACHE_VERSION)
     except WorkbookValidationError as exc:
         st.error(str(exc))
         return
@@ -36,9 +45,10 @@ def main() -> None:
         st.exception(exc)
         return
 
-    _render_baseline(data)
+    _render_baseline(data, history_df, source)
+    _render_history_trend(history_df, source, history_errors)
     policy = _render_policy_controls()
-    adjustments = _render_scenario_controls(data, policy)
+    adjustments = _render_scenario_controls(data, policy, source)
     result = run_scenario(data, adjustments, policy)
     _render_result(result)
     _render_detail_tabs(data, result)
@@ -49,27 +59,221 @@ def _load_data(source, _mtime_ns: int, _cache_version: int):
     return load_workbook_data(source)
 
 
-def _resolve_default_workbook() -> Path | None:
-    workbooks = sorted(Path(".").glob("*.xlsx"))
-    workbooks = [path for path in workbooks if not path.name.startswith("~$")]
-    if len(workbooks) != 1:
-        return None
-    return workbooks[0]
+@st.cache_data(show_spinner="正在读取历史指标...")
+def _load_history_metrics(source_specs: tuple[tuple[str, int, str, str, str, str, str, int], ...], _cache_version: int):
+    rows = []
+    errors = []
+    for path, _mtime_ns, source_key, report_month, report_date_label, timepoint_label, file_name, version_rank in source_specs:
+        try:
+            metrics = load_baseline_metrics(path)
+        except Exception as exc:
+            errors.append({"底稿": file_name, "错误": str(exc)})
+            continue
+        rows.append(
+            {
+                "source_key": source_key,
+                "报告月份": report_month,
+                "报告月末": report_date_label,
+                "底稿时点": timepoint_label,
+                "文件名": file_name,
+                "version_rank": version_rank,
+                "认可资产": metrics.admitted_assets,
+                "实际资本": metrics.actual_capital,
+                "核心资本": metrics.core_capital,
+                "最低资本": metrics.minimum_capital,
+                "量化风险最低资本": metrics.quantitative_minimum_capital,
+                "核心偿付能力充足率": metrics.core_solvency_ratio,
+                "综合偿付能力充足率": metrics.comprehensive_solvency_ratio,
+            }
+        )
+    history = pd.DataFrame(rows)
+    if not history.empty:
+        history = history.sort_values(["报告月末", "底稿时点", "version_rank", "文件名"]).reset_index(drop=True)
+    return history, errors
 
 
-def _render_baseline(data) -> None:
+def _history_source_specs(sources: list[WorkbookSource]) -> tuple[tuple[str, int, str, str, str, str, str, int], ...]:
+    return tuple(
+        (
+            str(source.path),
+            source.modified_time_ns,
+            source.source_key,
+            source.report_month,
+            source.report_date_label,
+            source.timepoint_label,
+            source.path.name,
+            source.sort_key[2],
+        )
+        for source in sources
+    )
+
+
+def _render_workbook_selector(sources: list[WorkbookSource]) -> WorkbookSource:
+    st.subheader("数据选择")
+    latest = latest_workbook_source(sources)
+    month_options = sorted({source.report_month for source in sources})
+    default_month = latest.report_month if latest else month_options[-1]
+    if st.session_state.get("selected_report_month") not in month_options:
+        st.session_state["selected_report_month"] = default_month
+
+    cols = st.columns([1.1, 1.2, 3])
+    selected_month = cols[0].selectbox(
+        "报告月份",
+        month_options,
+        index=month_options.index(st.session_state["selected_report_month"]),
+        key="selected_report_month",
+    )
+
+    month_sources = [source for source in sources if source.report_month == selected_month]
+    month_sources = sorted(month_sources, key=lambda source: source.sort_key)
+    timepoint_options = [source.timepoint_label for source in month_sources]
+    default_timepoint = timepoint_options[-1]
+    if st.session_state.get("selected_timepoint") not in timepoint_options:
+        st.session_state["selected_timepoint"] = default_timepoint
+    selected_timepoint = cols[1].selectbox(
+        "底稿时点",
+        timepoint_options,
+        index=timepoint_options.index(st.session_state["selected_timepoint"]),
+        key="selected_timepoint",
+    )
+
+    source = find_workbook_source(sources, selected_month, selected_timepoint)
+    cols[2].metric("当前测算底稿", f"{source.report_month} / {source.timepoint_label}")
+    st.caption(f"当前文件：{source.path.name}；origin stats 中共 {len(sources)} 个可用底稿。")
+    return source
+
+
+def _sync_selected_workbook_state(source: WorkbookSource) -> None:
+    previous_key = st.session_state.get("active_workbook_source_key")
+    if previous_key and previous_key != source.source_key:
+        _clear_target_solver_cache()
+    st.session_state["active_workbook_source_key"] = source.source_key
+
+
+def _clear_target_solver_cache() -> None:
+    for key in ["target_solver_signature", "target_solver_rows"]:
+        st.session_state.pop(key, None)
+
+
+def _render_baseline(data, history_df: pd.DataFrame, source: WorkbookSource) -> None:
     st.subheader("基准指标")
     metrics = data.metrics
+    previous = _previous_period_metrics(history_df, source)
     cols = st.columns(5)
-    cols[0].metric("认可资产", _fmt_money(metrics.admitted_assets))
-    cols[1].metric("实际资本", _fmt_money(metrics.actual_capital))
-    cols[2].metric("最低资本", _fmt_money(metrics.minimum_capital))
-    cols[3].metric("核心偿付能力充足率", _fmt_pct(metrics.core_solvency_ratio))
-    cols[4].metric("综合偿付能力充足率", _fmt_pct(metrics.comprehensive_solvency_ratio))
+    cols[0].metric("认可资产", _fmt_money(metrics.admitted_assets), _history_money_delta(previous, "认可资产", metrics.admitted_assets))
+    cols[1].metric("实际资本", _fmt_money(metrics.actual_capital), _history_money_delta(previous, "实际资本", metrics.actual_capital))
+    cols[2].metric("最低资本", _fmt_money(metrics.minimum_capital), _history_money_delta(previous, "最低资本", metrics.minimum_capital))
+    cols[3].metric(
+        "核心偿付能力充足率",
+        _fmt_pct(metrics.core_solvency_ratio),
+        _history_ratio_delta(previous, "核心偿付能力充足率", metrics.core_solvency_ratio),
+    )
+    cols[4].metric(
+        "综合偿付能力充足率",
+        _fmt_pct(metrics.comprehensive_solvency_ratio),
+        _history_ratio_delta(previous, "综合偿付能力充足率", metrics.comprehensive_solvency_ratio),
+    )
 
 
-def _render_scenario_controls(data, policy: PolicyParameters) -> list[Adjustment]:
+def _previous_period_metrics(history_df: pd.DataFrame, source: WorkbookSource) -> pd.Series | None:
+    trend = _trend_history_df(history_df, source)
+    if trend.empty:
+        return None
+    previous = trend[trend["报告月末"].astype(str) < source.report_date_label]
+    if previous.empty:
+        return None
+    return previous.sort_values("报告月末").iloc[-1]
+
+
+def _history_money_delta(previous: pd.Series | None, column: str, current_value: float) -> str | None:
+    if previous is None or column not in previous or pd.isna(previous[column]):
+        return None
+    return _fmt_money_delta(current_value - float(previous[column]))
+
+
+def _history_ratio_delta(previous: pd.Series | None, column: str, current_value: float) -> str | None:
+    if previous is None or column not in previous or pd.isna(previous[column]):
+        return None
+    return _fmt_pct_delta(current_value - float(previous[column]))
+
+
+def _render_history_trend(history_df: pd.DataFrame, source: WorkbookSource, errors: list[dict[str, str]]) -> None:
+    if errors:
+        failed = "、".join(item["底稿"] for item in errors[:3])
+        suffix = "等" if len(errors) > 3 else ""
+        st.warning(f"有 {len(errors)} 个历史底稿无法读取趋势指标，已跳过：{failed}{suffix}")
+
+    trend = _trend_history_df(history_df, source)
+    if trend.empty:
+        st.info("当前没有可展示的历史趋势。")
+        return
+
+    st.subheader("历史趋势")
+    chart_df = trend.melt(
+        id_vars=["报告月份", "底稿时点"],
+        value_vars=["核心偿付能力充足率", "综合偿付能力充足率"],
+        var_name="指标",
+        value_name="充足率",
+    )
+    chart_df["充足率"] = chart_df["充足率"] * 100.0
+    month_order = trend["报告月份"].tolist()
+    chart = (
+        alt.Chart(chart_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("报告月份:N", sort=month_order, title=None),
+            y=alt.Y("充足率:Q", title="%"),
+            color=alt.Color("指标:N", legend=alt.Legend(title=None)),
+            tooltip=[
+                alt.Tooltip("报告月份:N"),
+                alt.Tooltip("底稿时点:N"),
+                alt.Tooltip("指标:N"),
+                alt.Tooltip("充足率:Q", format=",.2f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+    cols = st.columns([1.45, 1])
+    with cols[0]:
+        st.altair_chart(chart, use_container_width=True)
+    with cols[1]:
+        st.dataframe(_display_history_df(trend), use_container_width=True, hide_index=True, height=300)
+
+
+def _trend_history_df(history_df: pd.DataFrame, source: WorkbookSource) -> pd.DataFrame:
+    if history_df.empty:
+        return history_df
+    ordered = history_df.sort_values(["报告月末", "底稿时点", "version_rank", "文件名"])
+    trend = ordered.groupby("报告月份", as_index=False).tail(1)
+    selected = ordered[ordered["source_key"] == source.source_key]
+    if not selected.empty and not (trend["source_key"] == source.source_key).any():
+        trend = pd.concat([trend[trend["报告月份"] != source.report_month], selected], ignore_index=True)
+    return trend.sort_values(["报告月末", "底稿时点", "version_rank", "文件名"]).reset_index(drop=True)
+
+
+def _display_history_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df[
+        [
+            "报告月份",
+            "底稿时点",
+            "认可资产",
+            "实际资本",
+            "最低资本",
+            "核心偿付能力充足率",
+            "综合偿付能力充足率",
+        ]
+    ].copy()
+    for col in ["认可资产", "实际资本", "最低资本"]:
+        out[col] = out[col].map(_fmt_money)
+    for col in ["核心偿付能力充足率", "综合偿付能力充足率"]:
+        out[col] = out[col].map(_fmt_pct)
+    return out
+
+
+def _render_scenario_controls(data, policy: PolicyParameters, source: WorkbookSource) -> list[Adjustment]:
     st.subheader("情景模块")
+    st.caption(f"当前测算底稿：{source.report_month} / {source.timepoint_label}（{source.path.name}）")
     position_tab, price_tab, market_tab, target_tab, base_tab = st.tabs(
         ["加仓/减仓/建仓", "上涨/下跌", "市场冲击", "目标倒推", "基准资产暴露"]
     )
@@ -868,6 +1072,10 @@ def _safe_div(numerator: float, denominator: float) -> float:
 
 def _fmt_money(value: float) -> str:
     return f"{value / 100000000:,.2f} 亿元"
+
+
+def _fmt_money_delta(value: float) -> str:
+    return f"{value / 100000000:+,.2f} 亿元"
 
 
 def _fmt_pct(value: float) -> str:

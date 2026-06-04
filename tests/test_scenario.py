@@ -8,15 +8,66 @@ import pytest
 
 from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summary, run_scenario
 from solvency_app.target import solve_target_change
-from solvency_app.workbook import WorkbookValidationError, load_workbook_data
+from solvency_app.workbook import (
+    WorkbookValidationError,
+    discover_workbook_sources,
+    find_workbook_source,
+    latest_workbook_source,
+    load_baseline_metrics,
+    load_workbook_data,
+    parse_workbook_source,
+)
 
 
-WORKBOOK = Path(__file__).resolve().parents[1] / "1000_20260430_20260512.xlsx"
+ROOT = Path(__file__).resolve().parents[1]
+WORKBOOK_DIR = ROOT / "origin stats"
+WORKBOOK = WORKBOOK_DIR / "1000_20260430_20260512.xlsx"
 
 
 @pytest.fixture(scope="module")
 def workbook_data():
     return load_workbook_data(WORKBOOK)
+
+
+def test_parse_workbook_source_regular_filename():
+    source = parse_workbook_source(WORKBOOK)
+    assert source.company_code == "1000"
+    assert source.report_month == "2026-04"
+    assert source.report_date_label == "2026-04-30"
+    assert source.timepoint_label == "2026-05-12"
+    assert source.version_suffix == ""
+
+
+def test_parse_workbook_source_version_suffix():
+    source = parse_workbook_source(WORKBOOK_DIR / "1000_20251231_20260113v2.xlsx")
+    assert source.report_month == "2025-12"
+    assert source.report_date_label == "2025-12-31"
+    assert source.timepoint_label == "2026-01-13 v2"
+    assert source.version_suffix == "v2"
+
+
+def test_discover_workbook_sources_sorts_and_defaults_to_latest():
+    sources = discover_workbook_sources(WORKBOOK_DIR)
+    assert [source.report_month for source in sources] == ["2025-12", "2026-02", "2026-03", "2026-04"]
+
+    latest = latest_workbook_source(sources)
+    assert latest is not None
+    assert latest.report_month == "2026-04"
+    assert latest.timepoint_label == "2026-05-12"
+    assert latest.path.name == "1000_20260430_20260512.xlsx"
+
+
+def test_find_workbook_source_uses_selected_month_and_timepoint():
+    sources = discover_workbook_sources(WORKBOOK_DIR)
+    selected = find_workbook_source(sources, "2026-02", "2026-03-12")
+    assert selected.path.name == "1000_20260228_20260312.xlsx"
+
+
+def test_lightweight_baseline_metrics_match_full_parse(workbook_data):
+    metrics = load_baseline_metrics(WORKBOOK)
+    assert metrics.admitted_assets == pytest.approx(workbook_data.metrics.admitted_assets)
+    assert metrics.minimum_capital == pytest.approx(workbook_data.metrics.minimum_capital)
+    assert metrics.comprehensive_solvency_ratio == pytest.approx(workbook_data.metrics.comprehensive_solvency_ratio)
 
 
 def test_loads_baseline_metrics(workbook_data):

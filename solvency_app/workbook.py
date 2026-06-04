@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+import re
 from typing import BinaryIO
 
 import pandas as pd
 
+
+WORKBOOK_SOURCE_DIR = Path("origin stats")
+WORKBOOK_FILENAME_RE = re.compile(
+    r"^(?P<company_code>[^_]+)_(?P<report_date>\d{8})_(?P<timepoint_date>\d{8})(?P<version_suffix>[A-Za-z]\w*)?\.xlsx$",
+    re.IGNORECASE,
+)
 
 SHEET_PREFIXES = {
     "s01": "S01_",
@@ -29,6 +37,45 @@ EXPOSURE_COLUMNS = [
 
 class WorkbookValidationError(ValueError):
     """Raised when an uploaded workbook is not a supported solvency workbook."""
+
+
+@dataclass(frozen=True)
+class WorkbookSource:
+    company_code: str
+    report_date: date
+    timepoint_date: date
+    version_suffix: str
+    path: Path
+    modified_time_ns: int
+
+    @property
+    def report_month(self) -> str:
+        return self.report_date.strftime("%Y-%m")
+
+    @property
+    def report_date_label(self) -> str:
+        return self.report_date.isoformat()
+
+    @property
+    def timepoint_label(self) -> str:
+        label = self.timepoint_date.isoformat()
+        if self.version_suffix:
+            label = f"{label} {self.version_suffix}"
+        return label
+
+    @property
+    def source_key(self) -> str:
+        return f"{self.report_date.isoformat()}|{self.timepoint_date.isoformat()}|{self.version_suffix}|{self.path.name}"
+
+    @property
+    def sort_key(self) -> tuple[date, date, int, str, str]:
+        return (
+            self.report_date,
+            self.timepoint_date,
+            _version_rank(self.version_suffix),
+            self.version_suffix,
+            self.path.name,
+        )
 
 
 @dataclass(frozen=True)
@@ -57,6 +104,59 @@ class WorkbookData:
     spread_factor_table: pd.DataFrame
     account_capital: pd.DataFrame
     source_name: str
+
+
+def discover_workbook_sources(folder: str | Path = WORKBOOK_SOURCE_DIR) -> list[WorkbookSource]:
+    source_dir = Path(folder)
+    if not source_dir.exists():
+        return []
+
+    sources: list[WorkbookSource] = []
+    for path in source_dir.glob("*.xlsx"):
+        if path.name.startswith("~$"):
+            continue
+        try:
+            sources.append(parse_workbook_source(path))
+        except WorkbookValidationError:
+            continue
+    return sorted(sources, key=lambda source: source.sort_key)
+
+
+def parse_workbook_source(path: str | Path) -> WorkbookSource:
+    workbook_path = Path(path)
+    match = WORKBOOK_FILENAME_RE.match(workbook_path.name)
+    if match is None:
+        raise WorkbookValidationError(f"无法从文件名解析报告月份和底稿时点: {workbook_path.name}")
+
+    report_date = _parse_yyyymmdd(match.group("report_date"), workbook_path.name)
+    timepoint_date = _parse_yyyymmdd(match.group("timepoint_date"), workbook_path.name)
+    version_suffix = match.group("version_suffix") or ""
+    modified_time_ns = workbook_path.stat().st_mtime_ns if workbook_path.exists() else 0
+    return WorkbookSource(
+        company_code=match.group("company_code"),
+        report_date=report_date,
+        timepoint_date=timepoint_date,
+        version_suffix=version_suffix,
+        path=workbook_path,
+        modified_time_ns=modified_time_ns,
+    )
+
+
+def latest_workbook_source(sources: list[WorkbookSource]) -> WorkbookSource | None:
+    if not sources:
+        return None
+    return max(sources, key=lambda source: source.sort_key)
+
+
+def find_workbook_source(
+    sources: list[WorkbookSource],
+    report_month: str,
+    timepoint_label: str,
+) -> WorkbookSource:
+    for source in sources:
+        if source.report_month == report_month and source.timepoint_label == timepoint_label:
+            return source
+    raise WorkbookValidationError(f"未找到报告月份 {report_month}、底稿时点 {timepoint_label} 的底稿")
 
 
 def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
@@ -88,15 +188,44 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
     )
 
 
+def load_baseline_metrics(source: str | Path | BinaryIO) -> BaselineMetrics:
+    excel = pd.ExcelFile(source, engine="openpyxl")
+    sheet_name = _resolve_sheet(excel.sheet_names, SHEET_PREFIXES["s01"])
+    s01 = _read_report_sheet(excel, sheet_name)
+    return _extract_metrics(s01)
+
+
+def _parse_yyyymmdd(raw: str, source_name: str) -> date:
+    try:
+        return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError as exc:
+        raise WorkbookValidationError(f"{source_name} 包含无效日期: {raw}") from exc
+
+
+def _version_rank(version_suffix: str) -> int:
+    if not version_suffix:
+        return 0
+    match = re.fullmatch(r"[vV](\d+)", version_suffix)
+    if match:
+        return int(match.group(1))
+    return 1
+
+
+def _resolve_sheet(sheet_names: list[str], prefix: str) -> str:
+    match = next((name for name in sheet_names if name.startswith(prefix)), None)
+    if match is None:
+        raise WorkbookValidationError(f"工作簿缺少必要 sheet: {prefix}")
+    return match
+
+
 def _resolve_sheets(sheet_names: list[str]) -> dict[str, str]:
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for key, prefix in SHEET_PREFIXES.items():
-        match = next((name for name in sheet_names if name.startswith(prefix)), None)
-        if match is None:
+        try:
+            resolved[key] = _resolve_sheet(sheet_names, prefix)
+        except WorkbookValidationError:
             missing.append(prefix)
-        else:
-            resolved[key] = match
     if missing:
         raise WorkbookValidationError(
             "工作簿缺少必要 sheet: " + ", ".join(missing)
