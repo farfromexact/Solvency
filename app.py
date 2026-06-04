@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -209,36 +211,229 @@ def _render_history_trend(history_df: pd.DataFrame, source: WorkbookSource, erro
         return
 
     st.subheader("历史趋势")
-    chart_df = trend.melt(
-        id_vars=["报告月份", "底稿时点"],
-        value_vars=["核心偿付能力充足率", "综合偿付能力充足率"],
-        var_name="指标",
-        value_name="充足率",
+    _render_history_snapshot(trend, source)
+
+    ratio_tab, capital_tab = st.tabs(["充足率趋势", "资本驱动"])
+    with ratio_tab:
+        st.altair_chart(_history_ratio_chart(trend, source), use_container_width=True)
+    with capital_tab:
+        st.altair_chart(_history_capital_chart(trend, source), use_container_width=True)
+
+    st.dataframe(
+        _display_history_df(trend),
+        use_container_width=True,
+        hide_index=True,
+        height=_history_table_height(len(trend)),
     )
-    chart_df["充足率"] = chart_df["充足率"] * 100.0
+
+
+def _render_history_snapshot(trend: pd.DataFrame, source: WorkbookSource) -> None:
+    current, previous = _history_current_and_previous(trend, source)
+    if current is None:
+        return
+    actual_capital = float(current["实际资本"])
+    minimum_capital = float(current["最低资本"])
+    capital_buffer = actual_capital - minimum_capital
+    previous_buffer = None
+    if previous is not None:
+        previous_buffer = float(previous["实际资本"]) - float(previous["最低资本"])
+
+    cols = st.columns(5)
+    cols[0].metric("趋势观察点", f"{current['报告月份']} / {current['底稿时点']}")
+    cols[1].metric(
+        "综合充足率",
+        _fmt_pct(float(current["综合偿付能力充足率"])),
+        _history_ratio_delta(previous, "综合偿付能力充足率", float(current["综合偿付能力充足率"])),
+    )
+    cols[2].metric(
+        "核心充足率",
+        _fmt_pct(float(current["核心偿付能力充足率"])),
+        _history_ratio_delta(previous, "核心偿付能力充足率", float(current["核心偿付能力充足率"])),
+    )
+    cols[3].metric(
+        "实际资本",
+        _fmt_money(actual_capital),
+        _history_money_delta(previous, "实际资本", actual_capital),
+    )
+    cols[4].metric(
+        "资本缓冲",
+        _fmt_money(capital_buffer),
+        None if previous_buffer is None else _fmt_money_delta(capital_buffer - previous_buffer),
+    )
+
+
+def _history_current_and_previous(trend: pd.DataFrame, source: WorkbookSource) -> tuple[pd.Series | None, pd.Series | None]:
+    if trend.empty:
+        return None, None
+    selected = trend[trend["source_key"] == source.source_key]
+    current = selected.iloc[-1] if not selected.empty else trend.iloc[-1]
+    previous = trend[trend["报告月末"].astype(str) < str(current["报告月末"])]
+    if previous.empty:
+        return current, None
+    return current, previous.sort_values("报告月末").iloc[-1]
+
+
+def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Chart:
+    chart_df = _history_ratio_chart_df(trend, source)
     month_order = trend["报告月份"].tolist()
-    chart = (
-        alt.Chart(chart_df)
-        .mark_line(point=True)
+    ratio_domain = _history_ratio_axis_domain(chart_df["充足率"])
+    metric_colors = alt.Scale(
+        domain=["综合偿付能力充足率", "核心偿付能力充足率"],
+        range=["#2563eb", "#38bdf8"],
+    )
+    base = alt.Chart(chart_df).encode(
+        x=alt.X("报告月份:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain), title="%"),
+        color=alt.Color("指标:N", scale=metric_colors, legend=alt.Legend(title=None, orient="top")),
+        tooltip=[
+            alt.Tooltip("报告月份:N"),
+            alt.Tooltip("底稿时点:N"),
+            alt.Tooltip("指标:N"),
+            alt.Tooltip("充足率:Q", format=",.2f"),
+            alt.Tooltip("较上期变化:Q", format="+.2f"),
+        ],
+    )
+    line = base.mark_line(strokeWidth=3)
+    points = base.mark_circle(size=70, opacity=0.9)
+    selected_points = (
+        alt.Chart(chart_df[chart_df["当前选中"]])
+        .mark_circle(size=180, stroke="white", strokeWidth=2)
         .encode(
             x=alt.X("报告月份:N", sort=month_order, title=None),
-            y=alt.Y("充足率:Q", title="%"),
-            color=alt.Color("指标:N", legend=alt.Legend(title=None)),
+            y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain), title="%"),
+            color=alt.Color("指标:N", scale=metric_colors, legend=None),
             tooltip=[
                 alt.Tooltip("报告月份:N"),
                 alt.Tooltip("底稿时点:N"),
                 alt.Tooltip("指标:N"),
                 alt.Tooltip("充足率:Q", format=",.2f"),
+                alt.Tooltip("较上期变化:Q", format="+.2f"),
             ],
         )
-        .properties(height=260)
     )
+    threshold_layers = []
+    for label, value, color in [
+        ("最低监管线 100%", 100.0, "#fca5a5"),
+        ("预警线 120%", 120.0, "#facc15"),
+        ("舒适线 150%", 150.0, "#86efac"),
+    ]:
+        threshold_df = pd.DataFrame([{"报告月份": month_order[-1], "监管线": label, "充足率": value}])
+        threshold_layers.extend(
+            [
+                alt.Chart(threshold_df)
+                .mark_rule(color=color, strokeDash=[5, 5], strokeWidth=1.4, opacity=0.9)
+                .encode(y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain))),
+                alt.Chart(threshold_df)
+                .mark_text(color=color, align="left", dx=8, dy=-4, fontSize=12)
+                .encode(
+                    x=alt.X("报告月份:N", sort=month_order),
+                    y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain)),
+                    text="监管线:N",
+                ),
+            ]
+        )
+    threshold_chart = alt.layer(*threshold_layers)
+    return (threshold_chart + line + points + selected_points).properties(height=320)
 
-    cols = st.columns([1.45, 1])
-    with cols[0]:
-        st.altair_chart(chart, use_container_width=True)
-    with cols[1]:
-        st.dataframe(_display_history_df(trend), use_container_width=True, hide_index=True, height=300)
+
+def _history_ratio_chart_df(trend: pd.DataFrame, source: WorkbookSource) -> pd.DataFrame:
+    chart_df = trend[
+        [
+            "source_key",
+            "报告月份",
+            "报告月末",
+            "底稿时点",
+            "核心偿付能力充足率",
+            "综合偿付能力充足率",
+        ]
+    ].copy()
+    chart_df = chart_df.melt(
+        id_vars=["source_key", "报告月份", "报告月末", "底稿时点"],
+        value_vars=["综合偿付能力充足率", "核心偿付能力充足率"],
+        var_name="指标",
+        value_name="充足率",
+    )
+    chart_df["充足率"] = chart_df["充足率"] * 100.0
+    chart_df["较上期变化"] = chart_df.groupby("指标")["充足率"].diff()
+    chart_df["当前选中"] = chart_df["source_key"] == source.source_key
+    return chart_df
+
+
+def _history_capital_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Chart:
+    chart_df = _history_capital_chart_df(trend, source)
+    month_order = trend["报告月份"].tolist()
+    selected = chart_df[chart_df["当前选中"]]
+    bar = (
+        alt.Chart(chart_df)
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+        .encode(
+            x=alt.X("报告月份:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("指标:N"),
+            y=alt.Y("金额:Q", title="亿元"),
+            color=alt.Color(
+                "指标:N",
+                scale=alt.Scale(domain=["实际资本", "最低资本", "量化风险最低资本"], range=["#2563eb", "#fb7185", "#f59e0b"]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip("报告月份:N"),
+                alt.Tooltip("底稿时点:N"),
+                alt.Tooltip("指标:N"),
+                alt.Tooltip("金额:Q", format=",.2f"),
+                alt.Tooltip("较上期变化:Q", format="+,.2f"),
+            ],
+        )
+    )
+    selected_points = (
+        alt.Chart(selected)
+        .mark_tick(thickness=3, size=26, color="#111827")
+        .encode(
+            x=alt.X("报告月份:N", sort=month_order, title=None),
+            xOffset=alt.XOffset("指标:N"),
+            y=alt.Y("金额:Q", title="亿元"),
+        )
+    )
+    return (bar + selected_points).properties(height=320)
+
+
+def _history_capital_chart_df(trend: pd.DataFrame, source: WorkbookSource) -> pd.DataFrame:
+    chart_df = trend[
+        [
+            "source_key",
+            "报告月份",
+            "报告月末",
+            "底稿时点",
+            "实际资本",
+            "最低资本",
+            "量化风险最低资本",
+        ]
+    ].copy()
+    chart_df = chart_df.melt(
+        id_vars=["source_key", "报告月份", "报告月末", "底稿时点"],
+        value_vars=["实际资本", "最低资本", "量化风险最低资本"],
+        var_name="指标",
+        value_name="金额",
+    )
+    chart_df["金额"] = chart_df["金额"] / 100000000.0
+    chart_df["较上期变化"] = chart_df.groupby("指标")["金额"].diff()
+    chart_df["当前选中"] = chart_df["source_key"] == source.source_key
+    return chart_df
+
+
+def _history_ratio_axis_domain(values: pd.Series) -> list[float]:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    anchors = pd.Series([100.0, 120.0, 150.0])
+    if numeric.empty:
+        numeric = anchors
+    else:
+        numeric = pd.concat([numeric, anchors], ignore_index=True)
+    lower = math.floor((float(numeric.min()) - 10.0) / 10.0) * 10.0
+    upper = math.ceil((float(numeric.max()) + 10.0) / 10.0) * 10.0
+    return [max(0.0, lower), max(upper, lower + 10.0)]
+
+
+def _history_table_height(row_count: int) -> int:
+    return min(max(92, 38 + row_count * 35), 220)
 
 
 def _trend_history_df(history_df: pd.DataFrame, source: WorkbookSource) -> pd.DataFrame:

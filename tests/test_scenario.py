@@ -70,6 +70,89 @@ def test_lightweight_baseline_metrics_match_full_parse(workbook_data):
     assert metrics.comprehensive_solvency_ratio == pytest.approx(workbook_data.metrics.comprehensive_solvency_ratio)
 
 
+def test_history_ratio_chart_data_marks_current_and_delta():
+    from app import _history_current_and_previous, _history_ratio_axis_domain, _history_ratio_chart_df
+
+    source = parse_workbook_source(WORKBOOK)
+    history = pd.DataFrame(
+        [
+            {
+                "source_key": "previous",
+                "报告月份": "2026-03",
+                "报告月末": "2026-03-31",
+                "底稿时点": "2026-04-13",
+                "实际资本": 100.0,
+                "最低资本": 80.0,
+                "量化风险最低资本": 78.0,
+                "核心偿付能力充足率": 0.95,
+                "综合偿付能力充足率": 1.25,
+            },
+            {
+                "source_key": source.source_key,
+                "报告月份": "2026-04",
+                "报告月末": source.report_date_label,
+                "底稿时点": source.timepoint_label,
+                "实际资本": 120.0,
+                "最低资本": 90.0,
+                "量化风险最低资本": 88.0,
+                "核心偿付能力充足率": 1.02,
+                "综合偿付能力充足率": 1.30,
+            },
+        ]
+    )
+
+    current, previous = _history_current_and_previous(history, source)
+    assert current["报告月份"] == "2026-04"
+    assert previous["报告月份"] == "2026-03"
+
+    chart_df = _history_ratio_chart_df(history, source)
+    assert chart_df["当前选中"].sum() == 2
+    current_comprehensive = chart_df[
+        (chart_df["当前选中"]) & (chart_df["指标"] == "综合偿付能力充足率")
+    ].iloc[0]
+    assert current_comprehensive["充足率"] == pytest.approx(130.0)
+    assert current_comprehensive["较上期变化"] == pytest.approx(5.0)
+
+    domain = _history_ratio_axis_domain(chart_df["充足率"])
+    assert domain[0] > 0
+    assert domain[0] <= 95.0
+    assert domain[1] >= 150.0
+
+
+def test_history_capital_chart_data_uses_yi_yuan_and_compact_height():
+    from app import _history_capital_chart_df, _history_table_height
+
+    source = parse_workbook_source(WORKBOOK)
+    history = pd.DataFrame(
+        [
+            {
+                "source_key": "previous",
+                "报告月份": "2026-03",
+                "报告月末": "2026-03-31",
+                "底稿时点": "2026-04-13",
+                "实际资本": 10_000_000_000.0,
+                "最低资本": 8_000_000_000.0,
+                "量化风险最低资本": 7_500_000_000.0,
+            },
+            {
+                "source_key": source.source_key,
+                "报告月份": "2026-04",
+                "报告月末": source.report_date_label,
+                "底稿时点": source.timepoint_label,
+                "实际资本": 12_000_000_000.0,
+                "最低资本": 9_000_000_000.0,
+                "量化风险最低资本": 8_800_000_000.0,
+            },
+        ]
+    )
+
+    chart_df = _history_capital_chart_df(history, source)
+    current_actual = chart_df[(chart_df["当前选中"]) & (chart_df["指标"] == "实际资本")].iloc[0]
+    assert current_actual["金额"] == pytest.approx(120.0)
+    assert current_actual["较上期变化"] == pytest.approx(20.0)
+    assert _history_table_height(2) < 180
+
+
 def test_loads_baseline_metrics(workbook_data):
     assert workbook_data.metrics.admitted_assets == pytest.approx(769701295456.44)
     assert workbook_data.metrics.minimum_capital == pytest.approx(51090271656.25)
