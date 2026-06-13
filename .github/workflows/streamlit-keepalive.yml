@@ -54,8 +54,13 @@ jobs:
           effective_url="$(printf '%s\n' "${curl_output}" | sed -n 's/^effective_url=//p')"
 
           if printf '%s' "${effective_url}" | grep -q '/-/login'; then
-            echo "::error title=Streamlit login required::The app redirects to Streamlit login. Make the app public or add a STREAMLIT_COOKIE repository secret."
-            exit 1
+            echo "::warning title=Streamlit login required::The app redirects to Streamlit login. The workflow is healthy, but the app must be public or use STREAMLIT_COOKIE for this ping to wake it."
+            exit 0
+          fi
+
+          if [ "${curl_status}" -eq 47 ]; then
+            echo "::warning title=Streamlit redirect loop::curl hit the redirect limit, usually because Streamlit Cloud requires login. The workflow will not fail, but this cannot wake a private app without STREAMLIT_COOKIE."
+            exit 0
           fi
 
           if [ "${curl_status}" -ne 0 ]; then
