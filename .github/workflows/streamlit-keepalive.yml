@@ -1,0 +1,48 @@
+name: Keep Streamlit Awake
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: streamlit-keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Ping Streamlit app
+        env:
+          # URL fragments after # are browser-only and are not sent in HTTP requests.
+          APP_URL: https://solvency-hjup7fca9n66mkyfwmiqxw.streamlit.app/
+        run: |
+          set -euo pipefail
+
+          echo "Pinging ${APP_URL}"
+          curl --fail --location --silent --show-error \
+            --connect-timeout 20 \
+            --max-time 90 \
+            --retry 3 \
+            --retry-delay 10 \
+            --retry-connrefused \
+            --user-agent "github-actions-streamlit-keepalive/1.0" \
+            "${APP_URL}" \
+            > /tmp/streamlit.html
+
+          # This endpoint is useful when available, but the page ping above is the
+          # source of truth because Streamlit Cloud can change internal routes.
+          curl --fail --location --silent --show-error \
+            --connect-timeout 20 \
+            --max-time 60 \
+            --retry 2 \
+            --retry-delay 5 \
+            --user-agent "github-actions-streamlit-keepalive/1.0" \
+            "${APP_URL%/}/_stcore/health" \
+            || true
