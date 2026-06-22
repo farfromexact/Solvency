@@ -1,0 +1,57 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="720" fill="#f7f8fb"/>
+  <rect x="32" y="28" width="1136" height="664" rx="18" fill="#ffffff" stroke="#e6e8ef"/>
+  <text x="64" y="78" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#202636">瀑布分析与风险贡献</text>
+  <text x="64" y="111" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">把充足率变化拆成资本端、最低资本端和风险子项贡献</text>
+
+  <rect x="64" y="144" width="1072" height="48" rx="10" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="88" y="174" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">情景输入</text>
+  <text x="188" y="174" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#ef4444">瀑布分析</text>
+  <text x="300" y="174" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">贡献分析</text>
+  <text x="402" y="174" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">因子假设</text>
+  <text x="504" y="174" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">暴露变化</text>
+  <line x1="188" y1="190" x2="270" y2="190" stroke="#ef4444" stroke-width="3"/>
+
+  <rect x="64" y="224" width="520" height="368" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="92" y="260" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">充足率变化拆解</text>
+  <line x1="120" y1="520" x2="532" y2="520" stroke="#d1d5db"/>
+  <rect x="128" y="358" width="72" height="162" fill="#2563eb"/>
+  <rect x="224" y="318" width="72" height="202" fill="#16a34a"/>
+  <rect x="320" y="404" width="72" height="116" fill="#ef4444"/>
+  <rect x="416" y="334" width="72" height="186" fill="#38bdf8"/>
+  <line x1="200" y1="358" x2="224" y2="318" stroke="#9ca3af" stroke-dasharray="4 4"/>
+  <line x1="296" y1="318" x2="320" y2="404" stroke="#9ca3af" stroke-dasharray="4 4"/>
+  <line x1="392" y1="404" x2="416" y2="334" stroke="#9ca3af" stroke-dasharray="4 4"/>
+  <text x="122" y="548" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">基准</text>
+  <text x="218" y="548" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">资本变化</text>
+  <text x="314" y="548" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">最低资本</text>
+  <text x="410" y="548" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">情景</text>
+  <text x="130" y="344" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#2563eb">133.48%</text>
+  <text x="226" y="304" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#16a34a">+4.90</text>
+  <text x="322" y="390" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#ef4444">-2.80</text>
+  <text x="418" y="320" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#38bdf8">135.58%</text>
+
+  <rect x="616" y="224" width="520" height="174" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="644" y="260" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">最低资本变化拆解</text>
+  <rect x="650" y="298" width="120" height="62" rx="8" fill="#eff6ff"/>
+  <text x="670" y="323" font-family="Arial, sans-serif" font-size="13" fill="#1d4ed8">市场风险</text>
+  <text x="670" y="348" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1d4ed8">+1.24 亿</text>
+  <rect x="794" y="298" width="120" height="62" rx="8" fill="#fee2e2"/>
+  <text x="814" y="323" font-family="Arial, sans-serif" font-size="13" fill="#b91c1c">信用风险</text>
+  <text x="814" y="348" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#b91c1c">-0.63 亿</text>
+  <rect x="938" y="298" width="148" height="62" rx="8" fill="#f3f4f6"/>
+  <text x="958" y="323" font-family="Arial, sans-serif" font-size="13" fill="#374151">相关矩阵影响</text>
+  <text x="958" y="348" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#374151">+0.31 亿</text>
+
+  <rect x="616" y="430" width="520" height="162" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="644" y="466" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">风险子项贡献排名</text>
+  <rect x="644" y="496" width="350" height="20" rx="10" fill="#dbeafe"/>
+  <rect x="644" y="496" width="284" height="20" rx="10" fill="#2563eb"/>
+  <text x="1010" y="512" font-family="Arial, sans-serif" font-size="13" fill="#374151">权益价格风险</text>
+  <rect x="644" y="528" width="350" height="20" rx="10" fill="#fee2e2"/>
+  <rect x="644" y="528" width="220" height="20" rx="10" fill="#ef4444"/>
+  <text x="1010" y="544" font-family="Arial, sans-serif" font-size="13" fill="#374151">交易对手风险</text>
+  <rect x="644" y="560" width="350" height="20" rx="10" fill="#dcfce7"/>
+  <rect x="644" y="560" width="162" height="20" rx="10" fill="#16a34a"/>
+  <text x="1010" y="576" font-family="Arial, sans-serif" font-size="13" fill="#374151">利率风险</text>
+</svg>

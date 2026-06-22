@@ -1,0 +1,84 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="720" fill="#f7f8fb"/>
+  <rect x="32" y="28" width="1136" height="664" rx="18" fill="#ffffff" stroke="#e6e8ef"/>
+  <text x="64" y="78" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#202636">偿付能力资产配置情景测算</text>
+  <text x="64" y="111" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">月度底稿选择、基准指标、历史趋势与情景测算入口</text>
+
+  <rect x="64" y="142" width="1072" height="82" rx="12" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="88" y="171" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#374151">数据选择</text>
+  <rect x="88" y="184" width="140" height="28" rx="6" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="104" y="204" font-family="Arial, sans-serif" font-size="13" fill="#374151">2026-05</text>
+  <rect x="248" y="184" width="170" height="28" rx="6" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="264" y="204" font-family="Arial, sans-serif" font-size="13" fill="#374151">2026-06-11</text>
+  <rect x="450" y="176" width="254" height="42" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="470" y="202" font-family="Arial, sans-serif" font-size="14" fill="#1d4ed8">当前测算底稿 2026-05 / 2026-06-11</text>
+
+  <g>
+    <rect x="64" y="250" width="198" height="78" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="82" y="278" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">认可资产</text>
+    <text x="82" y="309" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">7,697.01 亿元</text>
+    <rect x="82" y="318" width="76" height="20" rx="10" fill="#dcfce7"/>
+    <text x="94" y="333" font-family="Arial, sans-serif" font-size="11" fill="#15803d">+183.31</text>
+  </g>
+  <g>
+    <rect x="281" y="250" width="198" height="78" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="299" y="278" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">实际资本</text>
+    <text x="299" y="309" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">681.95 亿元</text>
+    <rect x="299" y="318" width="76" height="20" rx="10" fill="#dcfce7"/>
+    <text x="311" y="333" font-family="Arial, sans-serif" font-size="11" fill="#15803d">+62.04</text>
+  </g>
+  <g>
+    <rect x="498" y="250" width="198" height="78" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="516" y="278" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">最低资本</text>
+    <text x="516" y="309" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">510.90 亿元</text>
+    <rect x="516" y="318" width="76" height="20" rx="10" fill="#fee2e2"/>
+    <text x="528" y="333" font-family="Arial, sans-serif" font-size="11" fill="#b91c1c">+32.96</text>
+  </g>
+  <g>
+    <rect x="715" y="250" width="198" height="78" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="733" y="278" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">核心充足率</text>
+    <text x="733" y="309" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">102.92%</text>
+    <rect x="733" y="318" width="78" height="20" rx="10" fill="#dcfce7"/>
+    <text x="745" y="333" font-family="Arial, sans-serif" font-size="11" fill="#15803d">+5.94 pct</text>
+  </g>
+  <g>
+    <rect x="932" y="250" width="204" height="78" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="950" y="278" font-family="Arial, sans-serif" font-size="13" fill="#6b7280">综合充足率</text>
+    <text x="950" y="309" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">133.48%</text>
+    <rect x="950" y="318" width="78" height="20" rx="10" fill="#dcfce7"/>
+    <text x="962" y="333" font-family="Arial, sans-serif" font-size="11" fill="#15803d">+3.71 pct</text>
+  </g>
+
+  <text x="64" y="375" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#202636">历史趋势</text>
+  <rect x="64" y="398" width="714" height="238" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <line x1="105" y1="583" x2="738" y2="583" stroke="#e5e7eb"/>
+  <line x1="105" y1="528" x2="738" y2="528" stroke="#e5e7eb"/>
+  <line x1="105" y1="474" x2="738" y2="474" stroke="#e5e7eb"/>
+  <line x1="105" y1="420" x2="738" y2="420" stroke="#e5e7eb"/>
+  <line x1="105" y1="528" x2="738" y2="528" stroke="#facc15" stroke-dasharray="6 6"/>
+  <line x1="105" y1="474" x2="738" y2="474" stroke="#86efac" stroke-dasharray="6 6"/>
+  <line x1="105" y1="583" x2="738" y2="583" stroke="#fca5a5" stroke-dasharray="6 6"/>
+  <polyline points="143,501 330,560 515,534 700,521" fill="none" stroke="#2563eb" stroke-width="4"/>
+  <polyline points="143,421 330,486 515,467 700,454" fill="none" stroke="#38bdf8" stroke-width="4"/>
+  <circle cx="143" cy="501" r="5" fill="#2563eb"/>
+  <circle cx="330" cy="560" r="5" fill="#2563eb"/>
+  <circle cx="515" cy="534" r="5" fill="#2563eb"/>
+  <circle cx="700" cy="521" r="8" fill="#2563eb" stroke="#ffffff" stroke-width="3"/>
+  <circle cx="143" cy="421" r="5" fill="#38bdf8"/>
+  <circle cx="330" cy="486" r="5" fill="#38bdf8"/>
+  <circle cx="515" cy="467" r="5" fill="#38bdf8"/>
+  <circle cx="700" cy="454" r="8" fill="#38bdf8" stroke="#ffffff" stroke-width="3"/>
+  <text x="112" y="621" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">2025-12</text>
+  <text x="300" y="621" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">2026-02</text>
+  <text x="486" y="621" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">2026-03</text>
+  <text x="670" y="621" font-family="Arial, sans-serif" font-size="12" fill="#6b7280">2026-04</text>
+  <rect x="795" y="398" width="341" height="238" rx="12" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="820" y="432" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#374151">趋势观察点</text>
+  <text x="820" y="466" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#111827">2026-04 / 2026-05-12</text>
+  <text x="820" y="508" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">综合充足率</text>
+  <text x="940" y="508" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#2563eb">133.48%</text>
+  <text x="820" y="546" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">核心充足率</text>
+  <text x="940" y="546" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#2563eb">102.92%</text>
+  <text x="820" y="584" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">资本缓冲</text>
+  <text x="940" y="584" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#2563eb">171.05 亿元</text>
+</svg>
