@@ -1,82 +1,10 @@
 name: Keep Streamlit Awake
-
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: streamlit-keepalive
-  cancel-in-progress: true
-
 jobs:
-  ping:
+  skip:
+    if: false
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
     steps:
-      - name: Ping Streamlit app
-        env:
-          # URL fragments after # are browser-only and are not sent in HTTP requests.
-          APP_URL: https://solvency-hjup7fca9n66mkyfwmiqxw.streamlit.app/
-          STREAMLIT_COOKIE: ${{ secrets.STREAMLIT_COOKIE }}
-        run: |
-          set -euo pipefail
+      - run: echo "keepalive disabled"
 
-          curl_headers=()
-          if [ -n "${STREAMLIT_COOKIE}" ]; then
-            curl_headers=(--header "Cookie: ${STREAMLIT_COOKIE}")
-          fi
-
-          echo "Pinging ${APP_URL}"
-          set +e
-          curl_output="$(
-            curl --fail --location --silent --show-error \
-            --connect-timeout 20 \
-            --max-time 90 \
-            --max-redirs 10 \
-            --retry 3 \
-            --retry-delay 10 \
-            --retry-connrefused \
-            --user-agent "github-actions-streamlit-keepalive/1.0" \
-            --write-out "\nhttp_code=%{http_code}\neffective_url=%{url_effective}\nredirects=%{num_redirects}\n" \
-            "${curl_headers[@]}" \
-            "${APP_URL}" \
-            --output /tmp/streamlit.html
-          )"
-          curl_status=$?
-          set -e
-
-          echo "${curl_output}"
-          effective_url="$(printf '%s\n' "${curl_output}" | sed -n 's/^effective_url=//p')"
-
-          if printf '%s' "${effective_url}" | grep -q '/-/login'; then
-            echo "::warning title=Streamlit login required::The app redirects to Streamlit login. The workflow is healthy, but the app must be public or use STREAMLIT_COOKIE for this ping to wake it."
-            exit 0
-          fi
-
-          if [ "${curl_status}" -eq 47 ]; then
-            echo "::warning title=Streamlit redirect loop::curl hit the redirect limit, usually because Streamlit Cloud requires login. The workflow will not fail, but this cannot wake a private app without STREAMLIT_COOKIE."
-            exit 0
-          fi
-
-          if [ "${curl_status}" -ne 0 ]; then
-            echo "::error title=Streamlit ping failed::curl exited with status ${curl_status}."
-            exit "${curl_status}"
-          fi
-
-          # This endpoint is useful when available, but the page ping above is the
-          # source of truth because Streamlit Cloud can change internal routes.
-          curl --fail --location --silent --show-error \
-            --connect-timeout 20 \
-            --max-time 60 \
-            --max-redirs 5 \
-            --retry 2 \
-            --retry-delay 5 \
-            --user-agent "github-actions-streamlit-keepalive/1.0" \
-            "${curl_headers[@]}" \
-            "${APP_URL%/}/_stcore/health" \
-            || true
