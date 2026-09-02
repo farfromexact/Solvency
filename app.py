@@ -24,7 +24,206 @@ st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wi
 WORKBOOK_CACHE_VERSION = 3
 
 
+def _apply_columbia_theme() -> None:
+    """Align the app shell with the warm, navy-and-brass stats dashboard theme."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --columbia-bg: #F4F3EE;
+            --columbia-ink: #1C2433;
+            --columbia-navy: #1B3A5C;
+            --columbia-sky-soft: #A8D0E4;
+            --columbia-brass: #C9A84C;
+            --columbia-brass-deep: #A8882E;
+            --columbia-cream: #FFFBF3;
+            --columbia-border: #D9CDB5;
+            --columbia-muted: #5C6B7A;
+            --columbia-foam: #FBF6EC;
+            --columbia-crimson: #8C3A3A;
+        }
+
+        html, body, [class*="css"] {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main {
+            background: var(--columbia-bg);
+            color: var(--columbia-ink);
+        }
+
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        section.main > div {
+            position: relative;
+            z-index: 1;
+        }
+
+        h1, h2, h3 {
+            color: var(--columbia-navy);
+            font-family: inherit;
+            letter-spacing: 0;
+            font-weight: 700;
+        }
+
+        h1 {
+            border-bottom: 2px solid var(--columbia-sky-soft);
+            padding-bottom: 0.38rem;
+        }
+
+        h2 {
+            border-left: 3px solid var(--columbia-brass);
+            background: var(--columbia-cream);
+            padding-left: 0.65rem;
+            box-shadow: 0 3px 12px rgba(27, 58, 92, 0.04);
+        }
+
+        h3 {
+            color: #2A4A6B;
+        }
+
+        p, label, [data-testid="stCaptionContainer"] {
+            color: var(--columbia-muted);
+            font-family: inherit;
+        }
+
+        div[data-testid="stMetric"] {
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid var(--columbia-border);
+            border-radius: 6px;
+            padding: 0.85rem 1rem;
+            box-shadow: 0 2px 10px rgba(27, 58, 92, 0.05);
+        }
+
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetricLabel"] {
+            color: var(--columbia-navy);
+            font-family: inherit;
+            letter-spacing: 0;
+        }
+
+        div[data-testid="stMetricValue"],
+        div[data-testid="stMetricValue"] > div {
+            color: var(--columbia-ink);
+        }
+
+        div[data-testid="stMetricDelta"] {
+            border-radius: 999px;
+        }
+
+        div[data-testid="stDataFrame"],
+        div[data-testid="stVegaLiteChart"] {
+            background: rgba(255, 255, 255, 0.76);
+            border: 1px solid var(--columbia-border);
+            border-radius: 6px;
+            box-shadow: 0 3px 12px rgba(27, 58, 92, 0.04);
+        }
+
+        div[data-testid="stDataFrame"] {
+            overflow: hidden;
+        }
+
+        div[data-testid="stVegaLiteChart"] {
+            padding: 0.45rem;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 6px;
+            border-color: rgba(201, 168, 76, 0.55);
+            background: rgba(255, 251, 243, 0.85);
+        }
+
+        div[data-baseweb="tab-list"] {
+            gap: 0.2rem 0.55rem;
+            border-bottom: 1px solid var(--columbia-border);
+            padding: 0 0.15rem;
+        }
+
+        button[data-baseweb="tab"],
+        button[data-testid="stTab"] {
+            color: var(--columbia-muted);
+            flex: 0 0 auto;
+            min-height: 2.45rem;
+            padding: 0.45rem 0.8rem !important;
+            white-space: nowrap;
+        }
+
+        button[data-baseweb="tab"][aria-selected="true"],
+        button[data-testid="stTab"][aria-selected="true"] {
+            color: var(--columbia-navy);
+            font-weight: 700;
+        }
+
+        div[data-baseweb="tab-highlight"] {
+            background-color: var(--columbia-brass);
+        }
+
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        div[data-testid="stNumberInput"] div[data-baseweb="input"] {
+            background: var(--columbia-cream);
+            border-color: var(--columbia-border);
+            color: var(--columbia-ink);
+        }
+
+        div[data-baseweb="select"] *,
+        div[data-baseweb="input"] input,
+        div[data-testid="stNumberInput"] input,
+        textarea {
+            color: var(--columbia-ink);
+        }
+
+        div[data-baseweb="select"] > div:focus-within,
+        div[data-baseweb="input"] > div:focus-within {
+            border-color: var(--columbia-brass);
+            box-shadow: 0 0 0 1px var(--columbia-brass);
+        }
+
+        .stButton > button,
+        button[kind="primary"] {
+            background: var(--columbia-navy);
+            color: #FFFDF8 !important;
+            border: 1px solid var(--columbia-navy);
+            border-radius: 4px;
+            font-family: inherit;
+            font-weight: 600;
+            box-shadow: none;
+        }
+
+        .stButton > button:hover,
+        button[kind="primary"]:hover {
+            background: linear-gradient(180deg, #3A5F88 0%, #243F63 100%);
+            color: #FFFDF8 !important;
+            border-color: var(--columbia-brass);
+        }
+
+        .stButton > button *,
+        button[kind="primary"] * {
+            color: #FFFDF8 !important;
+        }
+
+        hr {
+            border-color: var(--columbia-border);
+            background: none;
+        }
+
+        code, pre, kbd {
+            color: var(--columbia-ink);
+            background: var(--columbia-cream);
+            border-color: var(--columbia-border);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
+    _apply_columbia_theme()
     st.title("偿付能力资产配置情景测算")
     st.caption("基于现有底稿反推口径的情景估算，不替代监管报送系统或完整偿二代复算引擎。")
     st.caption("风险模型：包含权益类/混合类资管产品映射和底稿风险暴露兜底。")
@@ -279,7 +478,7 @@ def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Cha
     ratio_domain = _history_ratio_axis_domain(chart_df["充足率"])
     metric_colors = alt.Scale(
         domain=["综合偿付能力充足率", "核心偿付能力充足率"],
-        range=["#2563eb", "#38bdf8"],
+        range=["#1B3A5C", "#3F7CAC"],
     )
     base = alt.Chart(chart_df).encode(
         x=alt.X("报告月份:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
@@ -313,18 +512,18 @@ def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Cha
     )
     threshold_layers = []
     for label, value, color in [
-        ("最低监管线 100%", 100.0, "#fca5a5"),
-        ("预警线 120%", 120.0, "#facc15"),
-        ("舒适线 150%", 150.0, "#86efac"),
+        ("最低监管线 100%", 100.0, "#8C3A3A"),
+        ("预警线 120%", 120.0, "#C08A2D"),
+        ("舒适线 150%", 150.0, "#2F7A6B"),
     ]:
         threshold_df = pd.DataFrame([{"报告月份": month_order[-1], "监管线": label, "充足率": value}])
         threshold_layers.extend(
             [
                 alt.Chart(threshold_df)
-                .mark_rule(color=color, strokeDash=[5, 5], strokeWidth=1.4, opacity=0.9)
+                .mark_rule(color=color, strokeDash=[5, 5], strokeWidth=1.6, opacity=0.95)
                 .encode(y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain))),
                 alt.Chart(threshold_df)
-                .mark_text(color=color, align="left", dx=8, dy=-4, fontSize=12)
+                .mark_text(color=color, align="left", dx=8, dy=-4, fontSize=12, fontWeight=600)
                 .encode(
                     x=alt.X("报告月份:N", sort=month_order),
                     y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain)),
@@ -372,7 +571,7 @@ def _history_capital_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.C
             y=alt.Y("金额:Q", title="亿元"),
             color=alt.Color(
                 "指标:N",
-                scale=alt.Scale(domain=["实际资本", "最低资本", "量化风险最低资本"], range=["#2563eb", "#fb7185", "#f59e0b"]),
+                scale=alt.Scale(domain=["实际资本", "最低资本", "量化风险最低资本"], range=["#1B3A5C", "#8C3A3A", "#C08A2D"]),
                 legend=alt.Legend(title=None, orient="top"),
             ),
             tooltip=[
@@ -386,7 +585,7 @@ def _history_capital_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.C
     )
     selected_points = (
         alt.Chart(selected)
-        .mark_tick(thickness=3, size=26, color="#111827")
+        .mark_tick(thickness=3, size=26, color="#1C2433")
         .encode(
             x=alt.X("报告月份:N", sort=month_order, title=None),
             xOffset=alt.XOffset("指标:N"),
