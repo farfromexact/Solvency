@@ -6,6 +6,7 @@ from math import sqrt
 import pandas as pd
 
 from .workbook import BaselineMetrics, WorkbookData
+from .calibration import calibration_ready
 
 
 VALUE_COL = "认可价值"
@@ -94,6 +95,7 @@ class PolicyParameters:
     market_risk_multiplier: float = 1.0
     credit_risk_multiplier: float = 1.0
     sync_actual_capital_with_assets: bool = False
+    use_calibrated_factors: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,10 @@ def run_scenario(
     policy = policy or PolicyParameters()
     base_metrics = data.metrics
     capital_lookup = _capital_lookup(data.s05)
+    if policy.use_calibrated_factors and not calibration_ready(data.calibration_checks):
+        raise ValueError("底稿风险因子勾稽未通过，不能生成校准口径情景；请到资产与风险页核查")
+    if policy.use_calibrated_factors and any(a.dimension != "资产类型" for a in adjustments):
+        raise ValueError("底稿校准口径当前只支持资产类型维度，不把全账户平均因子当作分账户因子")
 
     adjusted_kbqs, adjustment_summary, valuation_capital_delta = _apply_adjustments(data.kbqs, adjustments)
     baseline_capital = _baseline_capital_by_risk(capital_lookup)
@@ -157,6 +163,7 @@ def run_scenario(
         policy,
         data.interest_factor_table,
         data.spread_factor_table,
+        data.risk_factor_table if policy.use_calibrated_factors else None,
     )
     scenario_capital = _scenario_capital_by_risk(baseline_capital, capital_deltas)
 
@@ -193,7 +200,7 @@ def run_scenario(
     return ScenarioResult(
         baseline=baseline,
         scenario=scenario,
-        risk_rates=_factor_table(data.interest_factor_table, data.spread_factor_table),
+        risk_rates=_factor_table(data.interest_factor_table, data.spread_factor_table, data.risk_factor_table if policy.use_calibrated_factors else None),
         exposure_summary=_build_exposure_comparison(data.kbqs, adjusted_kbqs),
         contribution_summary=_build_contribution_summary(baseline_capital, scenario_capital),
         adjustment_summary=adjustment_summary,
@@ -242,6 +249,7 @@ def _calculate_capital_deltas(
     policy: PolicyParameters,
     interest_factor_table: pd.DataFrame,
     spread_factor_table: pd.DataFrame,
+    calibrated_table: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     direct = {name: 0.0 for name in [*MARKET_ITEMS, *CREDIT_ITEMS]}
     if not adjustment_summary.empty:
@@ -253,6 +261,7 @@ def _calculate_capital_deltas(
                 capital_lookup,
                 interest_factor_table,
                 spread_factor_table,
+                calibrated_table,
             )
 
     base_market = _vector_from_lookup(capital_lookup, MARKET_ITEMS)
@@ -286,6 +295,7 @@ def _add_risk_delta_from_adjustment(
     capital_lookup: dict[str, float],
     interest_factor_table: pd.DataFrame,
     spread_factor_table: pd.DataFrame,
+    calibrated_table: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     out = direct.copy()
     dimension = str(adjustment["维度"])
@@ -306,6 +316,14 @@ def _add_risk_delta_from_adjustment(
     for asset_type, exposure_row in by_type.iterrows():
         base_value = float(exposure_row[VALUE_COL])
         delta = value_delta * float(base_value) / total
+        if calibrated_table is not None:
+            selected = calibrated_table[calibrated_table["资产类型"].eq(str(asset_type))]
+            if selected.empty and delta != 0:
+                raise ValueError(f"{asset_type} 没有已勾稽的底稿风险因子")
+            out["利率风险"] -= delta * _lookup_interest_factor(interest_factor_table, str(asset_type), duration_bucket)
+            for _, factor_row in selected.iterrows():
+                out[str(factor_row["风险类型"])] += delta * float(factor_row["单位价值资本因子"])
+            continue
         factors = _factors_for_asset_type(str(asset_type), duration_bucket, interest_factor_table, spread_factor_table)
         if not _has_risk_factor(factors):
             factors = _fallback_factors_from_exposure(exposure_row, exposure_unit_rates)
@@ -487,7 +505,16 @@ def _lookup_capital(capital_lookup: dict[str, float], capital_item: str) -> floa
     return 0.0
 
 
-def _factor_table(interest_factor_table: pd.DataFrame, spread_factor_table: pd.DataFrame) -> pd.DataFrame:
+def _factor_table(interest_factor_table: pd.DataFrame, spread_factor_table: pd.DataFrame,
+                  calibrated_table: pd.DataFrame | None = None) -> pd.DataFrame:
+    if calibrated_table is not None:
+        calibrated_rows = [{"资产映射": row["资产类型"], "适用范围": row["风险类型"],
+                            "单位价值资本因子": row["单位价值资本因子"], "来源/口径": row["来源/口径"]}
+                           for _, row in calibrated_table.iterrows()]
+        calibrated_rows.extend({"资产映射": row["资产类型"], "适用范围": f"利率抵减 / {row['久期桶']}",
+                                "单位价值资本因子": row["利率风险抵减因子"], "来源/口径": row["来源/口径"]}
+                               for _, row in interest_factor_table.iterrows())
+        return pd.DataFrame(calibrated_rows)
     rows = []
     if not interest_factor_table.empty:
         for _, row in interest_factor_table.iterrows():

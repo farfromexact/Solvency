@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 import re
 from typing import BinaryIO
+import math
 
 import pandas as pd
+
+from .calibration import RISK_COLUMNS, build_calibration
 
 
 WORKBOOK_SOURCE_DIR = Path("origin stats")
@@ -104,6 +107,27 @@ class WorkbookData:
     spread_factor_table: pd.DataFrame
     account_capital: pd.DataFrame
     source_name: str
+    risk_factor_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    calibration_checks: pd.DataFrame = field(default_factory=pd.DataFrame)
+    cal_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+    mc_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+@dataclass(frozen=True)
+class ReportSnapshot:
+    """Small reporting snapshot; does not parse investment-detail sheets."""
+
+    metrics: BaselineMetrics
+    s01: pd.DataFrame
+    s05: pd.DataFrame
+    source_name: str
+
+
+def load_report_snapshot(source: str | Path | BinaryIO) -> ReportSnapshot:
+    with pd.ExcelFile(source, engine="openpyxl") as excel:
+        s01 = _read_report_sheet(excel, _resolve_sheet(excel.sheet_names, "S01_"))
+        s05 = _read_report_sheet(excel, _resolve_sheet(excel.sheet_names, "S05_"))
+    return ReportSnapshot(_extract_metrics(s01), s01, s05, getattr(source, "name", None) or str(source))
 
 
 def discover_workbook_sources(folder: str | Path = WORKBOOK_SOURCE_DIR) -> list[WorkbookSource]:
@@ -160,21 +184,28 @@ def find_workbook_source(
 
 
 def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
-    excel = pd.ExcelFile(source, engine="openpyxl")
+    with pd.ExcelFile(source, engine="openpyxl") as excel:
+        return _load_workbook_from_excel(excel, source)
+
+
+def _load_workbook_from_excel(excel: pd.ExcelFile, source) -> WorkbookData:
     sheets = _resolve_sheets(excel.sheet_names)
 
     s01 = _read_report_sheet(excel, sheets["s01"])
     s05 = _read_report_sheet(excel, sheets["s05"])
     kbqs = _read_kbqs_sheet(excel, sheets["kbqs"])
+    kbqs["来源文件"] = getattr(source, "name", None) or str(source)
     mc_result = _read_mc_result_sheet(excel, sheets["mc_result"])
     interest_factor_table = _build_interest_factor_table(mc_result)
     if interest_factor_table.empty:
         raise WorkbookValidationError("MC_RESULT_资产端利率风险明细表无法反推利率风险抵减因子")
     kbqs = _enrich_interest_risk_from_mc_result(kbqs, mc_result)
-    spread_factor_table = _build_spread_factor_table(_read_cal_detail_sheet(excel, sheets["cal_detail"]))
+    cal_detail = _read_cal_detail_sheet(excel, sheets["cal_detail"])
+    spread_factor_table = _build_spread_factor_table(cal_detail)
     account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
     source_name = getattr(source, "name", None) or str(source)
+    risk_factor_table, calibration_checks = build_calibration(cal_detail, kbqs, s05)
 
     return WorkbookData(
         metrics=metrics,
@@ -185,13 +216,17 @@ def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
         spread_factor_table=spread_factor_table,
         account_capital=account_capital,
         source_name=source_name,
+        risk_factor_table=risk_factor_table,
+        calibration_checks=calibration_checks,
+        cal_detail=cal_detail,
+        mc_detail=mc_result,
     )
 
 
 def load_baseline_metrics(source: str | Path | BinaryIO) -> BaselineMetrics:
-    excel = pd.ExcelFile(source, engine="openpyxl")
-    sheet_name = _resolve_sheet(excel.sheet_names, SHEET_PREFIXES["s01"])
-    s01 = _read_report_sheet(excel, sheet_name)
+    with pd.ExcelFile(source, engine="openpyxl") as excel:
+        sheet_name = _resolve_sheet(excel.sheet_names, SHEET_PREFIXES["s01"])
+        s01 = _read_report_sheet(excel, sheet_name)
     return _extract_metrics(s01)
 
 
@@ -256,13 +291,26 @@ def _read_kbqs_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
             f"{sheet_name} 缺少必要字段: " + ", ".join(sorted(missing))
         )
 
-    keep = ["表名", "账户", "证券名称", "证券代码", "资产类型", *EXPOSURE_COLUMNS]
+    keep = ["表名", "账户", "证券名称", "证券代码", "资产类型", *EXPOSURE_COLUMNS,
+            "穿透情况", "交易结构层级", "资产树标识符", "交易对手", "产品发行人",
+            "币种分类", "投资市场", "所在国家_地区", "到期日", "境外风险暴露"]
     existing = [col for col in keep if col in df.columns]
     df = df[existing].copy()
     df["账户"] = df["账户"].fillna("未分类账户").astype(str).str.strip()
     df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
     for col in EXPOSURE_COLUMNS:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        invalid = numeric.isna() | ~numeric.map(math.isfinite)
+        if invalid.any():
+            rows = ", ".join(str(index + 2) for index in df.index[invalid][:8])
+            raise WorkbookValidationError(
+                f"{sheet_name} 的 {col} 有 {int(invalid.sum())} 条空值或无效数值，"
+                f"Excel 行号 {rows}；未自动补零，请核查原始底稿"
+            )
+        df[col] = numeric
+    df["原始利率风险暴露"] = df["利率风险暴露"]
+    df["来源工作表"] = sheet_name
+    df["来源行"] = df.index + 2
     return df
 
 
@@ -276,6 +324,11 @@ def _read_mc_result_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
         "账户",
         "资产类型",
         "证券名称",
+        "证券代码",
+        "资产ID",
+        "资产树标识符",
+        "交易结构层级",
+        "到期日",
         "账面价值净价",
         "应收利息",
         "修正久期",
@@ -288,9 +341,12 @@ def _read_mc_result_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
     for col in ["账面价值净价", "应收利息", "修正久期", "PV基础", "资产端利率风险MC"]:
         if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            df[col] = float("nan") if col == "修正久期" else 0.0
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        df[col] = numeric if col == "修正久期" else numeric.fillna(0.0)
     df["利率风险资产价值"] = df["账面价值净价"] + df["应收利息"]
+    df["来源工作表"] = sheet_name
+    df["来源行"] = df.index + 3
     return df
 
 
@@ -303,11 +359,15 @@ def _build_interest_factor_table(mc_result: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    valid_duration = df["修正久期"].map(math.isfinite) & df["修正久期"].ge(0)
     df["久期桶"] = _duration_bucket(df["修正久期"])
+    df.loc[~valid_duration, "久期桶"] = "久期待核对"
+    df["久期有效价值"] = df["利率风险资产价值"].where(valid_duration, 0.0)
+    df["久期加权值"] = (df["修正久期"] * df["利率风险资产价值"]).where(valid_duration, 0.0)
     rows = []
 
     by_asset = (
-        df.groupby("资产类型", dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
+        df.groupby("资产类型", dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC", "久期有效价值", "久期加权值"]]
         .sum()
         .reset_index()
     )
@@ -315,7 +375,7 @@ def _build_interest_factor_table(mc_result: pd.DataFrame) -> pd.DataFrame:
     rows.append(by_asset)
 
     by_bucket = (
-        df.groupby(["资产类型", "久期桶"], dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC"]]
+        df.groupby(["资产类型", "久期桶"], dropna=False)[["利率风险资产价值", "PV基础", "资产端利率风险MC", "久期有效价值", "久期加权值"]]
         .sum()
         .reset_index()
     )
@@ -324,6 +384,8 @@ def _build_interest_factor_table(mc_result: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(rows, ignore_index=True)
     out["利率风险抵减因子"] = _safe_series_div(out["资产端利率风险MC"], out["利率风险资产价值"])
     out["PV口径抵减因子"] = _safe_series_div(out["资产端利率风险MC"], out["PV基础"])
+    out["加权修正久期"] = out["久期加权值"] / out["久期有效价值"].replace(0, float("nan"))
+    out["久期覆盖率"] = out["久期有效价值"] / out["利率风险资产价值"]
     out["来源/口径"] = "MC_RESULT_资产端利率风险明细表反推"
     return out[
         [
@@ -334,6 +396,8 @@ def _build_interest_factor_table(mc_result: pd.DataFrame) -> pd.DataFrame:
             "资产端利率风险MC",
             "利率风险抵减因子",
             "PV口径抵减因子",
+            "加权修正久期",
+            "久期覆盖率",
             "来源/口径",
         ]
     ]
@@ -346,23 +410,31 @@ def _duration_bucket(duration: pd.Series) -> pd.Series:
 
 
 def _read_cal_detail_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    upper = pd.read_excel(excel, sheet_name=sheet_name, header=None, nrows=1).iloc[0].ffill()
     df = pd.read_excel(excel, sheet_name=sheet_name, header=1)
     required = {"资产类型", "认可价值", "风险暴露.1", "RF.1", "MC.1"}
     missing = required.difference(df.columns)
     if missing:
         return pd.DataFrame()
-    keep = ["资产类型", "认可价值", "风险暴露.1", "RF.1", "MC.1"]
-    df = df[keep].copy()
+    for risk, (mc, exposure, flag, _) in RISK_COLUMNS.items():
+        for col in (mc, exposure):
+            if col not in df or str(upper.iloc[df.columns.get_loc(col)]).strip() != risk:
+                raise WorkbookValidationError(f"{sheet_name} 的 {col} 风险表头与 {risk} 不符，拒绝按列位置猜测")
+    keep = ["资产类型", "认可价值", "RF.1", "账户类别", "资产名称", "资产代码", "资产ID", "资产树标识",
+            "交易结构层级", "穿透情况", "修正久期", "资产信用评级", "发行主体信用评级",
+            "境内申万一级行业", "境外GICS行业分类", "币种", "投资市场", "到期日", "源表名"]
+    keep += [col for mc, ex, flag, _ in RISK_COLUMNS.values() for col in (mc, ex, flag)]
+    df = df[[col for col in keep if col in df]].copy()
+    # The first data row contains units, not an asset. Never drop a labelled asset
+    # merely because its value is invalid; the calibration controls must catch it.
+    df = df[df["资产类型"].notna()].copy()
     df["资产类型"] = df["资产类型"].fillna("未分类资产").astype(str).str.strip()
-    for col in ["认可价值", "风险暴露.1", "RF.1", "MC.1"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    return df.rename(
-        columns={
-            "风险暴露.1": "利差风险暴露",
-            "RF.1": "利差风险RF",
-            "MC.1": "利差风险MC",
-        }
-    )
+    df["认可价值"] = pd.to_numeric(df["认可价值"], errors="coerce")
+    for original, alias in {"风险暴露.1": "利差风险暴露", "RF.1": "利差风险RF", "MC.1": "利差风险MC"}.items():
+        df[alias] = pd.to_numeric(df[original], errors="coerce").fillna(0.0)
+    df["来源工作表"] = sheet_name
+    df["来源行"] = df.index + 3
+    return df
 
 
 def _build_spread_factor_table(cal_detail: pd.DataFrame) -> pd.DataFrame:
@@ -479,8 +551,10 @@ def _extract_metrics(s01: pd.DataFrame) -> BaselineMetrics:
         if item:
             values[item] = _to_float(row.get("期末数"))
 
-    core_capital = values.get("核心一级资本", 0.0) + values.get("核心二级资本", 0.0)
+    core_capital = _required(values, "核心一级资本") + _required(values, "核心二级资本")
     minimum_capital = _required(values, "最低资本")
+    if minimum_capital <= 0:
+        raise WorkbookValidationError("S01 最低资本必须大于 0，不能计算充足率")
     actual_capital = _required(values, "实际资本")
     return BaselineMetrics(
         admitted_assets=_required(values, "认可资产"),
@@ -500,15 +574,18 @@ def _extract_metrics(s01: pd.DataFrame) -> BaselineMetrics:
 
 def _required(values: dict[str, float], key: str) -> float:
     value = values.get(key)
-    if value is None:
-        raise WorkbookValidationError(f"S01 缺少必要指标: {key}")
+    if value is None or not math.isfinite(value):
+        raise WorkbookValidationError(f"S01 缺少必要指标或数值无效: {key}")
     return value
 
 
 def _to_float(value: object) -> float:
     if pd.isna(value):
-        return 0.0
-    return float(value)
+        return float("nan")
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return float("nan")
 
 
 def _safe_div(numerator: float, denominator: float) -> float:

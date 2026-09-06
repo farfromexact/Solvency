@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import asdict, replace
 
 import altair as alt
 import pandas as pd
@@ -8,7 +9,12 @@ import streamlit as st
 
 from solvency_app.policies import load_policy_overlays
 from solvency_app.scenario import Adjustment, PolicyParameters, build_asset_summary, run_scenario
-from solvency_app.target import solve_target_change
+from solvency_app.target import solve_target_level
+from solvency_app.analysis import ratio_attribution, report_changes, reconciliation, exposure_layers
+from solvency_app.calibration import calibration_ready
+from solvency_app.portfolio import surface_holdings, tree_inventory, distribution, maturity_profile
+from solvency_app.saved_plans import make_plan, serialize_plan, load_plan, compare_plans, switch_plan
+from solvency_app.workbench import empty_editor, editor_adjustments, editor_from_adjustments, active_plan_rows
 from solvency_app.workbook import (
     WorkbookSource,
     WorkbookValidationError,
@@ -17,11 +23,12 @@ from solvency_app.workbook import (
     latest_workbook_source,
     load_baseline_metrics,
     load_workbook_data,
+    load_report_snapshot,
 )
 
 
-st.set_page_config(page_title="偿付能力资产配置情景测算", layout="wide")
-WORKBOOK_CACHE_VERSION = 3
+st.set_page_config(page_title="偿付能力分析与情景工作台", layout="wide")
+WORKBOOK_CACHE_VERSION = 5
 
 
 def _apply_columbia_theme() -> None:
@@ -71,6 +78,7 @@ def _apply_columbia_theme() -> None:
         }
 
         h1 {
+            font-size: clamp(1.6rem, 3.2vw, 2.2rem) !important;
             border-bottom: 2px solid var(--columbia-sky-soft);
             padding-bottom: 0.38rem;
         }
@@ -109,6 +117,28 @@ def _apply_columbia_theme() -> None:
         div[data-testid="stMetricValue"],
         div[data-testid="stMetricValue"] > div {
             color: var(--columbia-ink);
+            font-size: clamp(1.4rem, 2.2vw, 2rem);
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+        }
+
+        [data-testid="stCaptionContainer"] p { color: #526170 !important; font-size: 0.9rem; }
+        .block-container { padding-top: 2rem; }
+        [data-testid="stMetricValue"] * { white-space: normal !important; text-overflow: clip !important; overflow: visible !important; }
+        [data-testid="stMetricLabel"] p { white-space: normal !important; }
+        @media (max-width: 1200px) {
+            .st-key-overview_metrics [data-testid="stHorizontalBlock"],
+            .st-key-scenario_metrics [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+            .st-key-overview_metrics [data-testid="stColumn"],
+            .st-key-scenario_metrics [data-testid="stColumn"] {
+                flex: 1 1 calc(50% - 1rem) !important;
+                min-width: calc(50% - 1rem) !important;
+            }
+        }
+        @media (max-width: 650px) {
+            .st-key-overview_metrics [data-testid="stColumn"],
+            .st-key-scenario_metrics [data-testid="stColumn"] { flex-basis: 100% !important; min-width: 100% !important; }
         }
 
         div[data-testid="stMetricDelta"] {
@@ -224,21 +254,21 @@ def _apply_columbia_theme() -> None:
 
 def main() -> None:
     _apply_columbia_theme()
-    st.title("偿付能力资产配置情景测算")
+    st.title("偿付能力分析与情景工作台")
     st.caption("基于现有底稿反推口径的情景估算，不替代监管报送系统或完整偿二代复算引擎。")
-    st.caption("风险模型：包含权益类/混合类资管产品映射和底稿风险暴露兜底。")
 
     sources = discover_workbook_sources()
     if not sources:
         st.error("origin stats 目录下没有找到可用的月度 Excel 底稿。")
         return
 
-    source = _render_workbook_selector(sources)
+    with st.sidebar:
+        source = _render_workbook_selector(sources)
+        page = st.radio("导航", ["总览与归因", "情景工作台", "资产与风险", "数据与口径"], key="workspace_page")
+        st.caption("原始底稿只读。更换月份或替换同名文件时，会清空已应用的情景。")
     _sync_selected_workbook_state(source)
-    history_df, history_errors = _load_history_metrics(_history_source_specs(sources), WORKBOOK_CACHE_VERSION)
-
     try:
-        data = _load_data(source.path, source.modified_time_ns, WORKBOOK_CACHE_VERSION)
+        snapshot = _load_snapshot(source.path, source.modified_time_ns, WORKBOOK_CACHE_VERSION)
     except WorkbookValidationError as exc:
         st.error(str(exc))
         return
@@ -246,22 +276,47 @@ def main() -> None:
         st.exception(exc)
         return
 
-    _render_baseline(data, history_df, source)
-    _render_history_trend(history_df, source, history_errors)
-    policy = _render_policy_controls()
-    adjustments = _render_scenario_controls(data, policy, source)
-    result = run_scenario(data, adjustments, policy)
-    _render_result(result)
-    _render_detail_tabs(data, result)
+    st.caption(f"报告月份 {source.report_month}　·　底稿时点 {source.timepoint_label}")
+    checks = reconciliation(snapshot)
+    if (checks["结果"] != "一致").any():
+        st.warning("底稿总表存在勾稽差异，请先到“数据与口径”核查；本次不生成情景结果。")
+        if page == "情景工作台":
+            st.dataframe(checks, hide_index=True, width="stretch")
+            return
+    if page == "总览与归因":
+        history_df, errors = _load_history_metrics(_history_source_specs(sources), WORKBOOK_CACHE_VERSION)
+        _render_overview(snapshot, history_df, errors, source, sources)
+        return
+    try:
+        data = _load_data(source.path, source.modified_time_ns, WORKBOOK_CACHE_VERSION)
+    except Exception as exc:
+        st.error(f"资产明细无法读取：{exc}。总览仍可使用。")
+        if page == "数据与口径":
+            _render_reconciliation(checks)
+            with st.expander("仍可读取的原始总表"):
+                st.dataframe(snapshot.s01, hide_index=True, width="stretch")
+                st.dataframe(snapshot.s05, hide_index=True, width="stretch")
+        return
+    if page == "情景工作台":
+        _render_workbench(data, source)
+    elif page == "资产与风险":
+        _render_asset_explorer(data, source)
+    else:
+        _render_data_quality(data, checks, source)
 
 
 @st.cache_data(show_spinner="正在解析底稿...")
-def _load_data(source, _mtime_ns: int, _cache_version: int):
+def _load_data(source, mtime_ns: int, cache_version: int):
     return load_workbook_data(source)
 
 
+@st.cache_data(show_spinner="正在读取总表...")
+def _load_snapshot(source, mtime_ns: int, cache_version: int):
+    return load_report_snapshot(source)
+
+
 @st.cache_data(show_spinner="正在读取历史指标...")
-def _load_history_metrics(source_specs: tuple[tuple[str, int, str, str, str, str, str, int], ...], _cache_version: int):
+def _load_history_metrics(source_specs: tuple[tuple[str, int, str, str, str, str, str, int], ...], cache_version: int):
     rows = []
     errors = []
     for path, _mtime_ns, source_key, report_month, report_date_label, timepoint_label, file_name, version_rank in source_specs:
@@ -317,11 +372,9 @@ def _render_workbook_selector(sources: list[WorkbookSource]) -> WorkbookSource:
     if st.session_state.get("selected_report_month") not in month_options:
         st.session_state["selected_report_month"] = default_month
 
-    cols = st.columns([1.1, 1.2, 3])
-    selected_month = cols[0].selectbox(
+    selected_month = st.selectbox(
         "报告月份",
         month_options,
-        index=month_options.index(st.session_state["selected_report_month"]),
         key="selected_report_month",
     )
 
@@ -331,24 +384,24 @@ def _render_workbook_selector(sources: list[WorkbookSource]) -> WorkbookSource:
     default_timepoint = timepoint_options[-1]
     if st.session_state.get("selected_timepoint") not in timepoint_options:
         st.session_state["selected_timepoint"] = default_timepoint
-    selected_timepoint = cols[1].selectbox(
+    selected_timepoint = st.selectbox(
         "底稿时点",
         timepoint_options,
-        index=timepoint_options.index(st.session_state["selected_timepoint"]),
         key="selected_timepoint",
     )
 
     source = find_workbook_source(sources, selected_month, selected_timepoint)
-    cols[2].metric("当前测算底稿", f"{source.report_month} / {source.timepoint_label}")
-    st.caption(f"当前文件：{source.path.name}；origin stats 中共 {len(sources)} 个可用底稿。")
+    st.caption(f"{len(sources)} 个可用底稿 · {source.path.name}")
     return source
 
 
 def _sync_selected_workbook_state(source: WorkbookSource) -> None:
     previous_key = st.session_state.get("active_workbook_source_key")
-    if previous_key and previous_key != source.source_key:
+    fingerprint = f"{source.source_key}|{source.modified_time_ns}|{WORKBOOK_CACHE_VERSION}"
+    if previous_key and previous_key != fingerprint:
         _clear_target_solver_cache()
-    st.session_state["active_workbook_source_key"] = source.source_key
+        _reset_workbench()
+    st.session_state["active_workbook_source_key"] = fingerprint
 
 
 def _clear_target_solver_cache() -> None:
@@ -360,20 +413,25 @@ def _render_baseline(data, history_df: pd.DataFrame, source: WorkbookSource) -> 
     st.subheader("基准指标")
     metrics = data.metrics
     previous = _previous_period_metrics(history_df, source)
-    cols = st.columns(5)
-    cols[0].metric("认可资产", _fmt_money(metrics.admitted_assets), _history_money_delta(previous, "认可资产", metrics.admitted_assets))
-    cols[1].metric("实际资本", _fmt_money(metrics.actual_capital), _history_money_delta(previous, "实际资本", metrics.actual_capital))
-    cols[2].metric("最低资本", _fmt_money(metrics.minimum_capital), _history_money_delta(previous, "最低资本", metrics.minimum_capital))
-    cols[3].metric(
-        "核心偿付能力充足率",
-        _fmt_pct(metrics.core_solvency_ratio),
-        _history_ratio_delta(previous, "核心偿付能力充足率", metrics.core_solvency_ratio),
-    )
-    cols[4].metric(
-        "综合偿付能力充足率",
+    cols = _metric_columns("overview_metrics")
+    cols[0].metric(
+        "综合充足率",
         _fmt_pct(metrics.comprehensive_solvency_ratio),
         _history_ratio_delta(previous, "综合偿付能力充足率", metrics.comprehensive_solvency_ratio),
     )
+    cols[1].metric(
+        "核心充足率",
+        _fmt_pct(metrics.core_solvency_ratio),
+        _history_ratio_delta(previous, "核心偿付能力充足率", metrics.core_solvency_ratio),
+    )
+    cols[2].metric("实际资本（亿元）", f"{metrics.actual_capital / 1e8:,.2f}", _history_money_delta(previous, "实际资本", metrics.actual_capital), delta_color="off")
+    cols[3].metric("最低资本（亿元）", f"{metrics.minimum_capital / 1e8:,.2f}", _history_money_delta(previous, "最低资本", metrics.minimum_capital), delta_color="off")
+    st.caption(f"认可资产 {_fmt_money(metrics.admitted_assets)}　·　核心资本 {_fmt_money(metrics.core_capital)}")
+
+
+def _metric_columns(key: str):
+    with st.container(key=key):
+        return st.columns(4)
 
 
 def _previous_period_metrics(history_df: pd.DataFrame, source: WorkbookSource) -> pd.Series | None:
@@ -398,6 +456,479 @@ def _history_ratio_delta(previous: pd.Series | None, column: str, current_value:
     return _fmt_pct_delta(current_value - float(previous[column]))
 
 
+def _render_overview(snapshot, history, errors, source, sources) -> None:
+    _render_baseline(snapshot, history, source)
+    previous_row = _previous_period_metrics(history, source)
+    if previous_row is not None:
+        st.caption(f"指标变化比较期：{previous_row['报告月份']} / {previous_row['底稿时点']}（上一可用月份）")
+    earlier = [s for s in sources if s.report_date < source.report_date]
+    st.subheader("本期变化归因")
+    if not earlier:
+        st.info("这是最早的可用底稿，没有更早期间可供比较。")
+    else:
+        previous_source = st.selectbox("归因比较期", earlier, index=len(earlier) - 1,
+                                       format_func=lambda s: f"{s.report_month} / {s.timepoint_label}",
+                                       key=f"comparison_{source.source_key}")
+        try:
+            previous = _load_snapshot(previous_source.path, previous_source.modified_time_ns, WORKBOOK_CACHE_VERSION)
+        except Exception as exc:
+            st.warning(f"比较期总表无法读取：{exc}")
+        else:
+            m, p = snapshot.metrics, previous.metrics
+            st.info(
+                f"较 {previous_source.report_month}，实际资本变化 {_fmt_money_delta(m.actual_capital - p.actual_capital)}，"
+                f"最低资本变化 {_fmt_money_delta(m.minimum_capital - p.minimum_capital)}；"
+                f"综合充足率变化 {_fmt_pct_delta(m.comprehensive_solvency_ratio - p.comprehensive_solvency_ratio)}，"
+                f"核心充足率变化 {_fmt_pct_delta(m.core_solvency_ratio - p.core_solvency_ratio)}。"
+            )
+            metric = st.radio("归因指标", ["综合偿付能力充足率", "核心偿付能力充足率"], horizontal=True)
+            bridge = ratio_attribution(snapshot, previous, metric)
+            steps = _waterfall_steps(list(bridge.itertuples(index=False, name=None)))
+            st.altair_chart(_waterfall_chart(steps, "百分点"), width="stretch")
+            st.caption("来源：两期 S01 期末数。先改变资本、再改变最低资本；两项影响之和与充足率变化一致，不代表交易或收益归因。")
+            with st.expander("查看资本结构与风险子项变化"):
+                st.markdown("**资本结构（亿元）**")
+                capital = report_changes(snapshot.s01, previous.s01)
+                selected = capital[capital["项目"].isin(["核心一级资本", "核心二级资本", "附属一级资本", "附属二级资本", "实际资本"])].copy()
+                st.dataframe(_numeric_report_change(selected), hide_index=True, width="stretch")
+                risk = report_changes(snapshot.s05, previous.s05)
+                risk = risk[risk["项目"].str.contains("风险-") & ~risk["项目"].str.contains("合计|分散")]
+                risk = risk.sort_values("变化", key=lambda s: s.abs(), ascending=False)
+                st.markdown("**风险子项变化（亿元，按绝对变化排序）**")
+                st.dataframe(_numeric_report_change(risk), hide_index=True, width="stretch")
+                st.caption("风险子项未经跨风险分散汇总，不能直接相加为总最低资本变化。缺失项目保持空值，不补零。")
+    _render_history_trend(history, source, errors)
+
+
+def _numeric_report_change(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for name in ("比较期", "本期", "变化"):
+        out[name] = out[name] / 1e8
+    return out
+
+
+def _reset_workbench(preserve_library: bool = False) -> None:
+    library = st.session_state.get("wb_library", {}) if preserve_library else {}
+    for key in list(st.session_state):
+        if key.startswith(("wb_", "market_bp_", "market_equity_pct")):
+            st.session_state.pop(key, None)
+    if library:
+        st.session_state["wb_library"] = library
+
+
+def _replace_workbench(adjustments, policy) -> None:
+    _reset_workbench(preserve_library=True)
+    st.session_state["wb_applied"] = {"adjustments": adjustments, "policy": policy}
+    st.session_state["wb_seed"] = editor_from_adjustments(adjustments)
+    st.session_state["wb_view"] = "构建情景"
+    st.session_state["wb_notice"] = "已用倒推方案替换当前情景，下面的正算结果已同步更新。"
+
+
+def _workbench_policy(default: PolicyParameters) -> PolicyParameters:
+    with st.expander("高级口径参数"):
+        cols = st.columns(3)
+        minimum = cols[0].number_input("最低资本乘数", min_value=0.01, max_value=2.0,
+                                       value=default.minimum_capital_multiplier, step=0.01, key="wb_policy_minimum")
+        market = cols[1].number_input("市场风险增量乘数", min_value=0.0, max_value=2.0,
+                                      value=default.market_risk_multiplier, step=0.01, key="wb_policy_market")
+        credit = cols[2].number_input("信用风险增量乘数", min_value=0.0, max_value=2.0,
+                                      value=default.credit_risk_multiplier, step=0.01, key="wb_policy_credit")
+        sync = st.checkbox("配置规模变化同步计入实际资本和核心资本（简化假设）",
+                           value=default.sync_actual_capital_with_assets, key="wb_policy_sync")
+        calibrated = st.checkbox("使用底稿校准风险因子（关闭则使用旧简化口径）",
+                                 value=default.use_calibrated_factors, key="wb_policy_calibrated")
+        st.caption("校准口径：CAL_DETAIL 风险资本 / 同类风险视图认可价值，包含已核对的境外价格和汇率风险；不是监管 RF，也不自动联动表层与底层持仓。")
+        st.caption("市场、信用乘数仅影响情景增量，不改变存量风险。最低资本乘数作用于测算总额，不代表自动适用任何监管优惠。")
+        st.caption("默认配置情景不计入资本分子；价格变化计入资本分子。暂不自动处理融资负债、税项及损失吸收效应。")
+    return PolicyParameters(minimum, market, credit, sync, calibrated)
+
+
+def _render_workbench(data, source) -> None:
+    st.subheader("情景工作台")
+    applied = st.session_state.get("wb_applied", {"adjustments": [], "policy": PolicyParameters(use_calibrated_factors=True)})
+    adjustments, policy = applied["adjustments"], applied["policy"]
+    if notice := st.session_state.pop("wb_notice", None):
+        st.success(notice)
+    left, right = st.columns([4, 1])
+    left.caption(f"当前生效：{len(adjustments)} 条资产调整 · 底稿 {source.report_month} / {source.timepoint_label}")
+    right.button("清空本次情景", on_click=_reset_workbench, args=(True,), width="stretch")
+    if adjustments:
+        st.dataframe(active_plan_rows(adjustments), hide_index=True, width="stretch")
+        if len({a.member for a in adjustments}) < len(adjustments):
+            st.warning("同一资产存在多条生效调整，将按列表顺序叠加。")
+    else:
+        st.info("当前没有生效的资产调整，结果为基准加已应用的高级口径参数。")
+    with st.expander("当前生效口径参数"):
+        st.write({"最低资本乘数": policy.minimum_capital_multiplier,
+                  "市场风险增量乘数": policy.market_risk_multiplier,
+                  "信用风险增量乘数": policy.credit_risk_multiplier,
+                  "配置变化同步资本": policy.sync_actual_capital_with_assets,
+                  "风险因子": "底稿校准" if policy.use_calibrated_factors else "旧简化口径"})
+    _render_plan_library(data, adjustments, policy)
+    view = st.radio("操作方式", ["构建情景", "目标倒推", "方案对比"], horizontal=True, key="wb_view")
+    if view == "构建情景":
+        _render_plan_editor(data, policy)
+    elif view == "目标倒推":
+        if policy.use_calibrated_factors and not calibration_ready(data.calibration_checks):
+            st.error("底稿因子校准未通过，请先核查或在构建情景页明确切换旧口径。")
+            return
+        _render_level_solver(data, policy)
+    else:
+        _render_plan_comparison(data, adjustments, policy)
+    st.divider()
+    st.caption("以下仅展示“当前生效情景”的正算结果。编辑草稿和未应用的倒推方案不会改变结果。")
+    try:
+        result = run_scenario(data, adjustments, policy)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    _render_result(result)
+    _render_detail_tabs(data, result)
+
+
+def _apply_library_plan(raw, data):
+    try:
+        plan, adjustments, policy = load_plan(raw, st.session_state["active_workbook_source_key"], data)
+    except ValueError as exc:
+        st.session_state["wb_library_error"] = str(exc)
+        return
+    _replace_workbench(adjustments, policy)
+    st.session_state["wb_notice"] = f"已用“{plan['name']}”替换当前方案并重新计算。"
+
+
+def _render_plan_library(data, adjustments, policy):
+    with st.expander("方案保存、载入与导出"):
+        if error := st.session_state.pop("wb_library_error", None):
+            st.error(error)
+        st.caption("保存的是当前生效输入，不含尚未应用的草稿。同底稿最多保留 6 个方案；切换底稿或关闭会话前可下载 JSON。载入时核对底稿、修改时间和模型版本，并重新正算。")
+        fingerprint = st.session_state["active_workbook_source_key"]
+        name = st.text_input("方案名称", value="方案 A", max_chars=60, key="wb_plan_name")
+        current = make_plan(name, fingerprint, adjustments, policy)
+        library = st.session_state.setdefault("wb_library", {})
+        if st.button("保存当前生效方案", key="wb_save_plan"):
+            if current["name"] in library:
+                st.warning("已有同名方案，请改名或先移除旧方案，不自动覆盖。")
+            elif len(library) >= 6:
+                st.warning("本次会话已保存 6 个方案，请先下载或移除一个。")
+            else:
+                library[current["name"]] = current
+                st.success(f"已保存 {current['name']}")
+        st.download_button("下载当前方案 JSON", serialize_plan(current), file_name="solvency-scenario.json", mime="application/json", key="wb_download_plan")
+        if library:
+            saved_name = st.selectbox("已保存方案", list(library), key="wb_saved_selection")
+            st.button("用已保存方案替换当前情景", key="wb_load_saved", on_click=_apply_library_plan,
+                      args=(serialize_plan(library[saved_name]), data))
+            if st.button("从本次会话移除此方案", key="wb_remove_saved"):
+                del library[saved_name]
+                st.rerun()
+        upload = st.file_uploader("载入已下载的方案 JSON", type=["json"], key="wb_import_plan")
+        if upload is not None:
+            st.button("核对并应用导入方案", key="wb_apply_import", on_click=_apply_library_plan, args=(upload.getvalue(), data))
+
+
+def _render_plan_comparison(data, adjustments, policy):
+    fingerprint = st.session_state["active_workbook_source_key"]
+    baseline = make_plan("原始底稿基准", fingerprint, [], PolicyParameters())
+    plans = [baseline, make_plan("当前生效", fingerprint, adjustments, policy)]
+    plans.extend(st.session_state.get("wb_library", {}).values())
+    st.caption("全部方案按当前底稿重新正算；仅横向比较同一报告期。金额单位亿元，充足率单位 %。")
+    try:
+        table = compare_plans(plans, fingerprint, data)
+        table.loc[0, "风险因子"] = "底稿原值"
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    st.dataframe(table, hide_index=True, width="stretch", column_config={
+        col: st.column_config.NumberColumn(format="%.2f") for col in table.columns if "（" in col})
+    with st.expander("当前情景的新旧因子口径对照"):
+        if st.button("计算新旧口径对照", key="wb_compare_basis"):
+            try:
+                variants = [make_plan(label, fingerprint, adjustments, replace(policy, use_calibrated_factors=enabled))
+                            for label, enabled in [("旧简化", False), ("底稿校准", True)]]
+                comparison = compare_plans(variants, fingerprint, data)
+                st.dataframe(comparison, hide_index=True, width="stretch")
+                st.caption("两行除风险因子开关外保持完全相同的输入与政策乘数；差异不是实际投资收益。")
+            except ValueError as exc:
+                st.error(str(exc))
+    with st.expander("单一资产敏感性"):
+        asset = st.selectbox("敏感性资产", sorted(data.kbqs["资产类型"].unique()), key="wb_sensitivity_asset")
+        mode = st.radio("敏感性动作", ["价格变化", "加减仓"], horizontal=True, key="wb_sensitivity_mode")
+        if st.button("计算 -10% 至 +10% 敏感性", key="wb_sensitivity_run"):
+            variants = [make_plan(f"{pct:+d}%", fingerprint, [Adjustment("资产类型", asset, pct, "price" if mode == "价格变化" else "position")], policy)
+                        for pct in [-10, -5, 0, 5, 10]]
+            try:
+                st.dataframe(compare_plans(variants, fingerprint, data), hide_index=True, width="stretch")
+                st.caption("各行从底稿基准独立出发，沿用当前生效口径，不叠加当前其他资产调整。")
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+def _render_plan_editor(data, policy) -> None:
+    options = build_asset_summary(data.kbqs, "资产类型")["资产类型"].tolist()
+    seed = st.session_state.get("wb_seed", empty_editor(options[0]))
+    epoch = st.session_state.get("wb_epoch", 0)
+    with st.expander("快速构建等额资产切换"):
+        st.caption("生成卖出 A、买入 B 两行，替换编辑草稿；仍需点击下方“计算并应用”。不计交易成本、税和资金到账时差。")
+        sell = st.selectbox("卖出资产", options, key="wb_switch_sell")
+        buy = st.selectbox("买入资产", options, index=min(1, len(options)-1), key="wb_switch_buy")
+        amount = st.number_input("切换金额（亿元）", min_value=0.01, value=1.0, key="wb_switch_amount")
+        if st.button("生成切换草稿", key="wb_switch_generate"):
+            try:
+                proposed = editor_from_adjustments(switch_plan(sell, buy, amount * 1e8))
+                editor_adjustments(proposed, data)
+                st.session_state["wb_seed"] = proposed
+                st.session_state["wb_epoch"] = epoch + 1
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    # Streamlit removes widget state when a page hides the widget. Keep the last
+    # applied market inputs separately so returning to the editor is lossless.
+    for key, value in st.session_state.get("wb_saved_market_inputs", {}).items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+    with st.form("wb_editor_form"):
+        st.caption("勾选启用后才纳入计算。编辑完成点击“计算并应用”；未提交的输入是草稿。零持仓建仓暂不支持。")
+        rows = st.data_editor(seed, num_rows="dynamic", hide_index=True, width="stretch",
+                              key=f"wb_editor_{epoch}", column_config={
+            "启用": st.column_config.CheckboxColumn(default=True),
+            "动作": st.column_config.SelectboxColumn(options=["加减仓", "价格变化"], required=True),
+            "资产类型": st.column_config.SelectboxColumn(options=options, required=True, width="medium"),
+            "输入方式": st.column_config.SelectboxColumn(options=["亿元", "%"], required=True),
+            "数值": st.column_config.NumberColumn(required=True, format="%.4f"),
+            "债券久期": st.column_config.SelectboxColumn(options=["存量平均", "<3年", "3-5年", "5-7年", "7-10年", "10-15年", "15-30年", "30年以上"], required=True),
+        })
+        st.caption("非债券选择“存量平均”；多条调整按行顺序作用于剩余存量。表层与穿透底层尚未完成持仓重建，本轮仍沿用原风险视图估算。")
+        st.caption("窄屏可横向滚动表格、折叠左侧栏，或点击表格右上角全屏按钮查看全部输入列。")
+        market_enabled = st.checkbox("叠加市场冲击", key="wb_market_enabled", value=False)
+        with st.expander("市场冲击输入（仅勾选后生效）"):
+            market_adjustments = _render_market_shock_controls(data)
+        draft_policy = _workbench_policy(policy)
+        submitted = st.form_submit_button("计算并应用", type="primary")
+    if submitted:
+        try:
+            draft = editor_adjustments(rows, data)
+            if market_enabled:
+                draft.extend(market_adjustments)
+            # Round-trip the combined plan through the same validation, including shocks.
+            editor_adjustments(editor_from_adjustments(draft), data)
+            run_scenario(data, draft, draft_policy)  # Validate before replacing the applied state.
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["wb_applied"] = {"adjustments": draft, "policy": draft_policy}
+            st.session_state["wb_saved_market_inputs"] = {
+                key: st.session_state[key] for key in st.session_state
+                if key == "wb_market_enabled" or key.startswith(("market_bp_", "market_equity_pct"))
+            }
+            st.session_state["wb_seed"] = rows.copy()
+            st.session_state["wb_epoch"] = epoch + 1
+            st.session_state["wb_notice"] = "情景已计算并应用。"
+            st.rerun()
+
+
+def _render_level_solver(data, policy) -> None:
+    st.caption("倒推从底稿基准及当前已应用口径出发，不叠加已有资产调整。应用时会替换当前方案。")
+    metric = st.radio("目标指标", ["综合偿付能力充足率", "核心偿付能力充足率"], horizontal=True, key="wb_target_metric")
+    baseline = float(run_scenario(data, [], policy).scenario[metric])
+    goal = st.radio("目标方式", ["至少达到", "调整到目标值"], horizontal=True, key="wb_target_goal")
+    target = st.number_input("目标充足率（%）", min_value=0.01, max_value=1000.0,
+                             value=round(baseline * 100 + 5, 2), step=1.0, key=f"wb_target_level_{metric}")
+    st.caption(f"当前基准 {baseline:.2%}；目标相对变化 {target - baseline * 100:+.2f} 个百分点。")
+    cols = st.columns([3, 2])
+    asset = cols[0].selectbox("资产类型", build_asset_summary(data.kbqs, "资产类型")["资产类型"].tolist(), key="wb_target_asset")
+    durations = _duration_options(data, asset) or ["存量平均"]
+    bucket = cols[1].selectbox("债券久期", durations, key=f"wb_target_bucket_{asset}")
+    signature = (metric, goal, target, asset, bucket, tuple(asdict(policy).values()))
+    if st.button("开始倒推", type="primary"):
+        with st.spinner("正在搜索两个方向的可行金额..."):
+            results = [solve_target_level(data, asset, metric, target / 100, mode, bucket, policy,
+                                          "at_least" if goal == "至少达到" else "exact")
+                       for mode in ("position", "price")]
+        st.session_state["wb_target_results"] = [asdict(r) for r in results]
+        st.session_state["wb_target_signature"] = signature
+    if "wb_target_results" not in st.session_state:
+        return
+    if st.session_state.get("wb_target_signature") != signature:
+        st.info("参数已变化，请重新倒推。旧方案不可应用。")
+        return
+    for column, result in zip(st.columns(2), st.session_state["wb_target_results"]):
+        with column.container(border=True):
+            mode = result["mode"]
+            st.markdown("**配置变化方案**" if mode == "position" else "**价格变化方案**")
+            if not result["solved"]:
+                st.warning("当前搜索范围内未找到可行方案")
+                st.write("所需变化金额：—")
+                st.caption(result["reason"])
+                continue
+            st.metric("所需变化（亿元）", f"{result['change_amount'] / 1e8:+,.2f}")
+            st.write(f"求解后充足率 **{result['achieved_ratio']:.2%}**")
+            st.caption(f"最低资本变化 {_fmt_money_delta(result['minimum_capital_delta'])}；实际资本变化 {_fmt_money_delta(result['actual_capital_delta'])}。")
+            st.caption("搜索边界：增量不超过该类存量的 5 倍，减量不超过存量；未施加融资、流动性或投资限额。")
+            if abs(result["change_amount"]) < 1e-6:
+                st.info("当前基准已满足目标，无需调整。")
+                continue
+            replay = [Adjustment("资产类型", asset, 0.0, mode, result["change_amount"], bucket)]
+            st.button("用此方案替换当前情景", key=f"wb_apply_{mode}", on_click=_replace_workbench,
+                      args=(replay, policy), width="stretch")
+
+
+def _render_asset_explorer(data, source) -> None:
+    st.subheader("资产与风险")
+    section = st.radio("分析视角", ["表层持仓", "穿透追溯", "风险与久期", "原风险视图"], horizontal=True, key="asset_section")
+    if section == "原风险视图":
+        _render_raw_risk_view(data)
+        return
+    if section == "风险与久期":
+        _render_calibrated_risks(data)
+        return
+    if section == "穿透追溯":
+        trees = tree_inventory(data.kbqs)
+        if trees.empty:
+            st.info("当前底稿没有资产树标识，不能可靠连接表层和穿透记录。")
+            return
+        unique = trees["定位结果"].eq("唯一表层").sum()
+        st.write(f"{len(trees)} 个账户内资产树，其中 {unique} 个可定位唯一表层。")
+        st.caption("资产树是分组关系；同一树中仅凭层级不能推断每条资产的直接父节点。不会按证券代码去重，也不跨账户连接。")
+        st.dataframe(trees, hide_index=True, width="stretch", column_config={"表层价值": st.column_config.NumberColumn(format="%.2f 元")})
+        choices = list(range(len(trees)))
+        index = st.selectbox("选择资产树", choices, format_func=lambda i: f"{trees.iloc[i]['账户']} · {trees.iloc[i]['资产树标识符']} · {trees.iloc[i]['表层资产']}")
+        tree = trees.iloc[index]
+        selected = data.kbqs[data.kbqs["账户"].eq(tree["账户"]) & data.kbqs["资产树标识符"].astype(str).eq(tree["资产树标识符"])].copy()
+        selected = selected.sort_values(["交易结构层级", "来源行"])
+        columns = ["交易结构层级", "资产类型", "证券名称", "认可价值", "穿透情况", "来源行", "来源工作表"]
+        st.dataframe(selected[columns], hide_index=True, width="stretch")
+        st.caption("以上各层认可价值不可相加；显示金额单位为元。")
+        return
+    holdings = surface_holdings(data.kbqs)
+    total = holdings["认可价值"].sum()
+    gap = data.metrics.admitted_assets - total
+    st.write(f"表层记录 {len(holdings):,} 条，认可价值 {_fmt_money(total)}；与 S01 认可资产仍相差 {_fmt_money(gap)}。")
+    st.warning("本页仅取交易结构层级 = 0，不含穿透底层或层级缺失记录。尚不是完整公司持仓；集中度分母只使用本页所选表层范围。")
+    accounts = st.multiselect("账户范围（留空表示全部）", sorted(holdings["账户"].unique()), key="surface_accounts")
+    if accounts:
+        holdings = holdings[holdings["账户"].isin(accounts)]
+    dimension = st.selectbox("结构维度", ["资产类型", "币种分类", "穿透情况", "交易对手", "产品发行人"], key="surface_dimension")
+    table = distribution(holdings, dimension)
+    _render_distribution(table, dimension)
+    with st.expander("到期结构"):
+        st.caption("按报告月末计算合同到期天数，不等于可变现期限；无到期日可能是永续资产、权益或缺失，不补成零期限。")
+        _render_distribution(maturity_profile(holdings, source.report_date), "到期分组")
+    with st.expander("表层明细与来源"):
+        query = st.text_input("名称或证券代码", key="surface_search")
+        selected = holdings
+        if query:
+            mask = selected["证券名称"].fillna("").astype(str).str.contains(query, regex=False) | selected["证券代码"].fillna("").astype(str).str.contains(query, regex=False)
+            selected = selected[mask]
+        st.dataframe(selected, hide_index=True, width="stretch")
+
+
+def _render_distribution(table, dimension) -> None:
+    display = table.copy()
+    display["认可价值（亿元）"] = display.pop("认可价值") / 1e8
+    display["占所选范围（%）"] = display.pop("占所选范围比例") * 100
+    st.dataframe(display, hide_index=True, width="stretch", column_config={
+        "认可价值（亿元）": st.column_config.NumberColumn(format="%.2f"),
+        "占所选范围（%）": st.column_config.NumberColumn(format="%.2f"),
+    })
+    if not display.empty:
+        chart = alt.Chart(display.head(10)).mark_bar(color="#395B7D").encode(
+            x=alt.X("认可价值（亿元）:Q"), y=alt.Y(f"{dimension}:N", sort="-x", axis=alt.Axis(labelLimit=200)),
+            tooltip=[dimension, alt.Tooltip("认可价值（亿元）:Q", format=",.2f"), alt.Tooltip("占所选范围（%）:Q", format=".2f")])
+        st.altair_chart(chart, width="stretch")
+
+
+def _render_calibrated_risks(data) -> None:
+    st.caption("按原跨表风险视图归集，不将这张表解释为去重持仓的资本贡献；父产品变化不会自动带动其穿透明细。")
+    if calibration_ready(data.calibration_checks):
+        st.success("风险明细与 S05 及 KBQS 价值口径已勾稽，可以使用底稿校准因子。")
+    else:
+        st.warning("校准检查未全部通过，校准口径不能用于情景计算。")
+    with st.expander("校准勾稽明细"):
+        st.dataframe(data.calibration_checks, hide_index=True, width="stretch")
+    if not data.risk_factor_table.empty:
+        asset = st.selectbox("校准资产类型", sorted(data.risk_factor_table["资产类型"].unique()), key="calibration_asset")
+        selected = data.risk_factor_table[data.risk_factor_table["资产类型"].eq(asset)]
+        table = selected[["风险类型", "认可价值", "风险资本", "单位价值资本因子", "来源字段"]].copy()
+        table["认可价值"] /= 1e8
+        table["风险资本"] /= 1e8
+        table["单位价值资本因子"] *= 100
+        table = table.rename(columns={"认可价值": "风险视图价值（亿元）", "风险资本": "子项资本（亿元）", "单位价值资本因子": "单位价值资本因子（%）"})
+        st.dataframe(table, hide_index=True, width="stretch", column_config={col: st.column_config.NumberColumn(format="%.4f") for col in table.columns if "（" in col})
+        st.caption("资本因子 = 同类资产该风险 MC 合计 / 同类认可价值；它已反映底稿内结构，不是监管 RF。各子项尚未扣除跨风险分散效应。")
+    st.markdown("#### 底稿加权修正久期")
+    durations = data.interest_factor_table[["资产类型", "久期桶", "利率风险资产价值", "加权修正久期", "久期覆盖率"]].copy()
+    durations["利率风险资产价值"] /= 1e8
+    durations = durations.rename(columns={"利率风险资产价值": "全价价值（亿元）"})
+    st.dataframe(durations, hide_index=True, width="stretch", column_config={
+        "全价价值（亿元）": st.column_config.NumberColumn(format="%.2f"), "加权修正久期": st.column_config.NumberColumn(format="%.3f 年"),
+    })
+    st.caption("以账面价值净价 + 应收利息加权；缺失久期单列，不用桶中点代替。底稿中的零值保留，不据此认定没有利率风险。价格冲击仍是一阶近似，不包含凸性和负债重估。")
+    with st.expander("校准来源明细（元）"):
+        st.dataframe(data.cal_detail, hide_index=True, width="stretch")
+
+
+def _render_raw_risk_view(data) -> None:
+    st.subheader("资产与风险")
+    st.warning("本页是跨表风险视图，包含表层与穿透记录。认可价值汇总不是公司总持仓，不能将两层相加。")
+    dimension = st.radio("汇总维度", ["资产类型", "账户"], horizontal=True)
+    layers = pd.to_numeric(data.kbqs.get("交易结构层级"), errors="coerce")
+    scope = st.selectbox("查看层次", ["全部风险记录", "表层记录", "穿透底层记录", "层级缺失记录"])
+    selected = data.kbqs
+    if layers is not None:
+        masks = {"表层记录": layers == 0, "穿透底层记录": layers > 0, "层级缺失记录": layers.isna()}
+        if scope in masks:
+            selected = selected.loc[masks[scope]]
+    summary, config = _sortable_money_df(build_asset_summary(selected, dimension))
+    st.dataframe(summary, column_config=config, hide_index=True, width="stretch")
+    st.caption("利率风险暴露为原模型反推展示值；原始字段在下方明细单独保留。")
+    with st.expander("查询资产明细与来源"):
+        query = st.text_input("证券名称或代码包含")
+        if query:
+            mask = selected["证券名称"].fillna("").str.contains(query, regex=False)
+            mask |= selected["证券代码"].fillna("").astype(str).str.contains(query, regex=False)
+            selected = selected[mask]
+        st.caption(f"共 {len(selected):,} 条记录；下表金额单位为元，来源行为 Excel 原始行号。")
+        st.dataframe(selected, hide_index=True, width="stretch")
+
+
+def _render_reconciliation(checks) -> None:
+    passed = int(checks["结果"].eq("一致").sum())
+    message = f"总表勾稽：{passed} / {len(checks)} 项一致（按列示容差核对）。"
+    if passed == len(checks):
+        st.success(message)
+    else:
+        st.warning(message)
+    st.dataframe(checks[["检查项", "结果", "差额", "容差", "单位"]], hide_index=True, width="stretch")
+    with st.expander("勾稽计算值与底稿值"):
+        st.dataframe(checks, hide_index=True, width="stretch")
+
+
+def _render_data_quality(data, checks, source) -> None:
+    st.subheader("数据与口径")
+    st.write(f"来源文件：{source.path.name}")
+    st.caption(f"{len(data.kbqs):,} 条风险记录 · {data.kbqs['资产类型'].nunique()} 类资产 · {data.kbqs['账户'].nunique()} 类账户")
+    _render_reconciliation(checks)
+    st.markdown("**表层与穿透记录（分开展示，金额为亿元）**")
+    layer_table = exposure_layers(data.kbqs)
+    layer_table["认可价值"] /= 1e8
+    st.dataframe(layer_table, hide_index=True, width="stretch", column_config={
+        "认可价值": st.column_config.NumberColumn("认可价值（亿元）", format="%.2f"),
+    })
+    gap = data.kbqs["认可价值"].sum() - data.metrics.admitted_assets
+    st.warning(f"风险视图全部记录与 S01 认可资产的差额为 {_fmt_money(gap)}。包含穿透层级及口径差异，不认定为数据错误，也不据此调整底稿。")
+    missing_codes = data.kbqs["证券代码"].isna().sum()
+    st.caption(f"证券代码缺失 {missing_codes:,} 条。来源文件、工作表和行号用于本次定位，不将证券代码视为唯一标识。")
+    st.markdown("**当前模型边界**")
+    st.write("情景继续采用原跨表风险视图上的增量估算。已接入经勾稽的境外价格、汇率及其他风险平均因子，但不自动联动表层与穿透明细，亦不重算负债现金流、税项、损失吸收效应及政策适用条件。")
+    st.caption("一般监管底线：核心充足率 50%、综合充足率 100%；完整达标判断还需风险综合评级等信息，本应用不输出整体合规结论。")
+    st.markdown("[监管指标来源：保险公司偿付能力管理规定](https://www.nfra.gov.cn/cn/view/pages/rulesDetail.html?docId=962016&itemId=4214)")
+    with st.expander("政策资料摘要（说明性，不自动应用）"):
+        st.dataframe(load_policy_overlays(), hide_index=True, width="stretch")
+    with st.expander("原始总表与分账户资本"):
+        for table in (data.s01, data.s05, data.account_capital):
+            st.dataframe(_display_report_money_df(table), hide_index=True, width="stretch")
+
+
 def _render_history_trend(history_df: pd.DataFrame, source: WorkbookSource, errors: list[dict[str, str]]) -> None:
     if errors:
         failed = "、".join(item["底稿"] for item in errors[:3])
@@ -410,55 +941,18 @@ def _render_history_trend(history_df: pd.DataFrame, source: WorkbookSource, erro
         return
 
     st.subheader("历史趋势")
-    _render_history_snapshot(trend, source)
 
     ratio_tab, capital_tab = st.tabs(["充足率趋势", "资本驱动"])
     with ratio_tab:
-        st.altair_chart(_history_ratio_chart(trend, source), use_container_width=True)
+        metric = st.radio("趋势指标", ["综合偿付能力充足率", "核心偿付能力充足率"], horizontal=True)
+        st.altair_chart(_history_ratio_chart(trend, source, metric), width="stretch")
+        st.caption("横轴按可用报告月份排列；缺失月份不补值，变化均指较上一可用月份。")
     with capital_tab:
-        st.altair_chart(_history_capital_chart(trend, source), use_container_width=True)
+        st.altair_chart(_history_capital_chart(trend, source), width="stretch")
 
-    st.dataframe(
-        _display_history_df(trend),
-        use_container_width=True,
-        hide_index=True,
-        height=_history_table_height(len(trend)),
-    )
-
-
-def _render_history_snapshot(trend: pd.DataFrame, source: WorkbookSource) -> None:
-    current, previous = _history_current_and_previous(trend, source)
-    if current is None:
-        return
-    actual_capital = float(current["实际资本"])
-    minimum_capital = float(current["最低资本"])
-    capital_buffer = actual_capital - minimum_capital
-    previous_buffer = None
-    if previous is not None:
-        previous_buffer = float(previous["实际资本"]) - float(previous["最低资本"])
-
-    cols = st.columns(5)
-    cols[0].metric("趋势观察点", f"{current['报告月份']} / {current['底稿时点']}")
-    cols[1].metric(
-        "综合充足率",
-        _fmt_pct(float(current["综合偿付能力充足率"])),
-        _history_ratio_delta(previous, "综合偿付能力充足率", float(current["综合偿付能力充足率"])),
-    )
-    cols[2].metric(
-        "核心充足率",
-        _fmt_pct(float(current["核心偿付能力充足率"])),
-        _history_ratio_delta(previous, "核心偿付能力充足率", float(current["核心偿付能力充足率"])),
-    )
-    cols[3].metric(
-        "实际资本",
-        _fmt_money(actual_capital),
-        _history_money_delta(previous, "实际资本", actual_capital),
-    )
-    cols[4].metric(
-        "资本缓冲",
-        _fmt_money(capital_buffer),
-        None if previous_buffer is None else _fmt_money_delta(capital_buffer - previous_buffer),
-    )
+    with st.expander("查看完整历史表"):
+        st.dataframe(_display_history_df(trend), width="stretch", hide_index=True,
+                     height=_history_table_height(len(trend)))
 
 
 def _history_current_and_previous(trend: pd.DataFrame, source: WorkbookSource) -> tuple[pd.Series | None, pd.Series | None]:
@@ -472,13 +966,16 @@ def _history_current_and_previous(trend: pd.DataFrame, source: WorkbookSource) -
     return current, previous.sort_values("报告月末").iloc[-1]
 
 
-def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Chart:
+def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource, metric: str = "综合偿付能力充足率") -> alt.Chart:
     chart_df = _history_ratio_chart_df(trend, source)
+    chart_df = chart_df[chart_df["指标"] == metric]
     month_order = trend["报告月份"].tolist()
-    ratio_domain = _history_ratio_axis_domain(chart_df["充足率"])
+    minimum = 50.0 if metric == "核心偿付能力充足率" else 100.0
+    ratio_domain = [max(0, math.floor((min(chart_df["充足率"].min(), minimum) - 10) / 10) * 10),
+                    math.ceil((max(chart_df["充足率"].max(), minimum) + 10) / 10) * 10]
     metric_colors = alt.Scale(
-        domain=["综合偿付能力充足率", "核心偿付能力充足率"],
-        range=["#1B3A5C", "#3F7CAC"],
+        domain=[metric],
+        range=["#1B3A5C" if minimum == 100 else "#3F7CAC"],
     )
     base = alt.Chart(chart_df).encode(
         x=alt.X("报告月份:N", sort=month_order, title=None, axis=alt.Axis(labelAngle=0)),
@@ -511,11 +1008,7 @@ def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Cha
         )
     )
     threshold_layers = []
-    for label, value, color in [
-        ("最低监管线 100%", 100.0, "#8C3A3A"),
-        ("预警线 120%", 120.0, "#C08A2D"),
-        ("舒适线 150%", 150.0, "#2F7A6B"),
-    ]:
+    for label, value, color in [(f"{'核心' if minimum == 50 else '综合'}监管底线 {minimum:.0f}%", minimum, "#8C3A3A")]:
         threshold_df = pd.DataFrame([{"报告月份": month_order[-1], "监管线": label, "充足率": value}])
         threshold_layers.extend(
             [
@@ -523,7 +1016,7 @@ def _history_ratio_chart(trend: pd.DataFrame, source: WorkbookSource) -> alt.Cha
                 .mark_rule(color=color, strokeDash=[5, 5], strokeWidth=1.6, opacity=0.95)
                 .encode(y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain))),
                 alt.Chart(threshold_df)
-                .mark_text(color=color, align="left", dx=8, dy=-4, fontSize=12, fontWeight=600)
+                .mark_text(color=color, align="right", dx=-8, dy=-6, fontSize=12, fontWeight=600)
                 .encode(
                     x=alt.X("报告月份:N", sort=month_order),
                     y=alt.Y("充足率:Q", scale=alt.Scale(domain=ratio_domain)),
@@ -665,36 +1158,6 @@ def _display_history_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _render_scenario_controls(data, policy: PolicyParameters, source: WorkbookSource) -> list[Adjustment]:
-    st.subheader("情景模块")
-    st.caption(f"当前测算底稿：{source.report_month} / {source.timepoint_label}（{source.path.name}）")
-    position_tab, price_tab, market_tab, target_tab, base_tab = st.tabs(
-        ["加仓/减仓/建仓", "上涨/下跌", "市场冲击", "目标倒推", "基准资产暴露"]
-    )
-    adjustments: list[Adjustment] = []
-
-    with position_tab:
-        st.caption("用于模拟买入、卖出、建仓或减仓。按选中资产类型现有结构同比调整风险暴露；债券类资产可选择久期 bucket。")
-        adjustments.extend(_render_adjustment_rows(data, mode_name="position", key_prefix="position"))
-
-    with price_tab:
-        st.caption("用于模拟资产价格上涨或下跌。估值变动默认进入实际资本和核心资本，同时按暴露变化估算最低资本影响。")
-        adjustments.extend(_render_adjustment_rows(data, mode_name="price", key_prefix="price"))
-
-    with market_tab:
-        adjustments.extend(_render_market_shock_controls(data))
-
-    with target_tab:
-        _render_target_solver(data, policy)
-
-    with base_tab:
-        summary = build_asset_summary(data.kbqs, "资产类型")
-        sortable_summary, column_config = _sortable_money_df(summary)
-        st.dataframe(sortable_summary, column_config=column_config, use_container_width=True, height=360)
-
-    return adjustments
-
-
 EQUITY_MARKET_SHOCK_BETAS = {
     "上市普通股票": 1.0,
     "优先股": 1.0,
@@ -759,7 +1222,7 @@ def _render_market_shock_controls(data) -> list[Adjustment]:
         rows.extend(bond_summary.to_dict("records"))
 
     if rows:
-        st.dataframe(_display_market_shock_df(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
+        st.dataframe(_display_market_shock_df(pd.DataFrame(rows)), width="stretch", hide_index=True)
     else:
         st.info("当前没有非零市场冲击。")
     return adjustments
@@ -803,7 +1266,10 @@ def _bond_market_shock_adjustments(
         if match.empty:
             continue
         basis_value = float(match.iloc[0]["利率风险资产价值"])
-        duration = _duration_bucket_midpoint(bucket)
+        duration = float(match.iloc[0].get("加权修正久期", float("nan")))
+        coverage = float(match.iloc[0].get("久期覆盖率", 0.0))
+        if not math.isfinite(duration) or coverage < 1 - 1e-9:
+            raise ValueError(f"{asset_type} {bucket} 修正久期不完整，不能计算该组价格冲击")
         price_delta = -duration * bp / 10000.0 * basis_value
         adjustments.append(
             Adjustment(
@@ -836,6 +1302,7 @@ def _bond_bucket_rows(data, asset_type: str) -> pd.DataFrame:
     scoped = table[
         (table["资产类型"].astype(str) == asset_type)
         & (table["久期桶"].astype(str) != "存量平均")
+        & (table["久期桶"].astype(str) != "久期待核对")
         & (pd.to_numeric(table["利率风险资产价值"], errors="coerce").fillna(0.0) > 0)
     ].copy()
     if scoped.empty:
@@ -885,82 +1352,6 @@ def _display_market_shock_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _render_adjustment_rows(data, mode_name: str, key_prefix: str) -> list[Adjustment]:
-    dimension = "资产类型"
-    summary = build_asset_summary(data.kbqs, dimension)
-    options = summary[dimension].astype(str).tolist()
-    count = st.number_input(
-        "情景条数",
-        min_value=1,
-        max_value=5,
-        value=1,
-        step=1,
-        key=f"{key_prefix}_count",
-    )
-    input_mode = st.radio(
-        "输入方式",
-        ["比例", "金额"],
-        horizontal=True,
-        key=f"{key_prefix}_input_mode",
-        help="金额单位为元；系统会按该对象现有认可价值反推变化比例。",
-    )
-    adjustments: list[Adjustment] = []
-    for idx in range(int(count)):
-        cols = st.columns([3, 1.3, 1.2, 1.2])
-        member = cols[0].selectbox(
-            f"对象 {idx + 1}",
-            options,
-            key=f"{key_prefix}_member_{dimension}_{idx}",
-        )
-        duration_bucket = "存量平均"
-        duration_options = _duration_options(data, member)
-        if duration_options:
-            duration_bucket = cols[1].selectbox(
-                "债券久期",
-                duration_options,
-                key=f"{key_prefix}_duration_{dimension}_{idx}",
-                help="来自 MC_RESULT_资产端利率风险明细表；选择后用该资产类型在对应久期 bucket 的利率风险抵减因子。",
-            )
-            input_col = cols[2]
-        else:
-            input_col = cols[1]
-        if input_mode == "比例":
-            pct = input_col.number_input(
-                "变化比例%",
-                min_value=-100.0,
-                max_value=500.0,
-                value=0.0,
-                step=1.0,
-                key=f"{key_prefix}_pct_{dimension}_{idx}",
-            )
-            amount = 0.0
-        else:
-            amount_yi = input_col.number_input(
-                "变化金额(亿元)",
-                min_value=-10_000.0,
-                max_value=10_000.0,
-                value=0.0,
-                step=1.0,
-                format="%.2f",
-                key=f"{key_prefix}_amount_{dimension}_{idx}",
-            )
-            amount = float(amount_yi) * 100000000.0
-            pct = 0.0
-        current_value = float(summary.loc[summary[dimension].astype(str) == member, "认可价值"].sum())
-        cols[3].metric("当前认可价值", _fmt_money(current_value))
-        adjustments.append(
-            Adjustment(
-                dimension=dimension,
-                member=member,
-                change_pct=float(pct),
-                mode=mode_name,
-                change_amount=float(amount),
-                duration_bucket=duration_bucket,
-            )
-        )
-    return adjustments
-
-
 def _duration_options(data, asset_type: str) -> list[str]:
     table = getattr(data, "interest_factor_table", pd.DataFrame())
     if table.empty:
@@ -973,170 +1364,8 @@ def _duration_options(data, asset_type: str) -> list[str]:
     return [item for item in preferred if item in available]
 
 
-def _render_target_solver(data, policy: PolicyParameters) -> None:
-    st.caption(
-        "按目标偿付能力充足率倒推单一资产类型所需的最小变化金额，可返回加仓/上涨或减仓/下跌。点击按钮后计算，避免每次调整参数都重跑。"
-        "加仓倒推只改变资产配置和最低资本链条；上涨/下跌按估值变动同步影响实际资本和核心资本。"
-    )
-    metric = st.radio(
-        "目标指标",
-        ["综合偿付能力充足率", "核心偿付能力充足率"],
-        horizontal=True,
-        key="target_metric",
-    )
-    baseline_ratio = float(run_scenario(data, [], policy).scenario[metric])
-    st.markdown(
-        """
-        <style>
-        .st-key-target_shortcuts .shortcut-label {
-            color: rgb(49, 51, 63);
-            font-size: 14px;
-            font-weight: 400;
-            line-height: 1.6;
-            margin: 0 0 0.25rem;
-        }
-        .st-key-target_shortcuts div[data-testid="stHorizontalBlock"] {
-            gap: 0;
-        }
-        .st-key-target_shortcuts div[data-testid="column"] {
-            flex: 0 0 auto;
-            width: auto !important;
-            min-width: 0 !important;
-        }
-        .st-key-target_shortcuts button {
-            min-width: 5.25rem;
-            min-height: 2.3rem;
-            border-radius: 0.45rem;
-            font-weight: 400;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    with st.container(key="target_shortcuts"):
-        st.markdown('<div class="shortcut-label">快捷输入</div>', unsafe_allow_html=True)
-        shortcut_cols = st.columns([0.58, 0.58, 0.58, 6], gap=None)
-        for col, target in zip(shortcut_cols[:3], [1.0, 1.2, 1.5]):
-            if col.button(_fmt_pct(target), key=f"target_shortcut_{int(target * 100)}"):
-                st.session_state["target_delta_pct"] = round((target - baseline_ratio) * 100.0, 2)
-
-    with st.form("target_solver_form"):
-        summary = build_asset_summary(data.kbqs, "资产类型")
-        options = summary["资产类型"].astype(str).tolist()
-        cols = st.columns([1.4, 3, 1.3])
-        target_delta = cols[0].number_input(
-            "目标变化(pct)",
-            min_value=-100.0,
-            max_value=100.0,
-            value=5.0,
-            step=0.5,
-            format="%.2f",
-            key="target_delta_pct",
-            help="按百分点处理，例如 5 表示从 129.70% 到 134.70%。上方快捷按钮只会填入这个数值，不会开始倒推。",
-        )
-        target_ratio = baseline_ratio + float(target_delta) / 100.0
-        asset_type = cols[1].selectbox("资产类型", options, key="target_asset_type")
-        duration_options = _duration_options(data, asset_type)
-        duration_bucket = "存量平均"
-        if duration_options:
-            duration_bucket = cols[2].selectbox("债券久期", duration_options, key="target_duration_bucket")
-        else:
-            cols[2].metric("债券久期", "不适用")
-        submitted = st.form_submit_button("开始倒推")
-
-    policy_signature = (
-        policy.minimum_capital_multiplier,
-        policy.market_risk_multiplier,
-        policy.credit_risk_multiplier,
-        policy.sync_actual_capital_with_assets,
-    )
-    input_signature = (metric, float(target_ratio), float(target_delta), asset_type, duration_bucket, policy_signature)
-    if submitted:
-        results = [
-            solve_target_change(
-                data=data,
-                asset_type=asset_type,
-                metric=metric,
-                target_delta_pct_points=float(target_delta),
-                mode="position",
-                duration_bucket=duration_bucket,
-                policy=policy,
-            ),
-            solve_target_change(
-                data=data,
-                asset_type=asset_type,
-                metric=metric,
-                target_delta_pct_points=float(target_delta),
-                mode="price",
-                duration_bucket=duration_bucket,
-                policy=policy,
-            ),
-        ]
-        rows = []
-        for result in results:
-            if result.mode == "position":
-                action = "加仓/建仓（配置口径）"
-                replay_note = "正算复现需在加仓/减仓/建仓模块输入同一变化金额，并选择相同债券久期。"
-            else:
-                action = "上涨/下跌（估值变动）"
-                replay_note = "正算复现需在上涨/下跌模块输入同一变化金额，并选择相同债券久期。"
-            rows.append(
-                {
-                    "动作": action,
-                    "状态": "有解" if result.solved else "无解",
-                    "基准充足率": result.baseline_ratio,
-                    "目标充足率": result.target_ratio,
-                    "求解后充足率": result.achieved_ratio,
-                    "所需变化金额": result.change_amount if result.solved else 0.0,
-                    "所需变化比例": result.change_pct if result.solved else 0.0,
-                    "最低资本变化": result.minimum_capital_delta,
-                    "实际资本变化": result.actual_capital_delta,
-                    "说明": result.reason,
-                    "正算复现口径": replay_note,
-                }
-            )
-        st.session_state["target_solver_signature"] = input_signature
-        st.session_state["target_solver_rows"] = rows
-
-    if "target_solver_rows" not in st.session_state:
-        st.info("设置目标参数后点击“开始倒推”计算。")
-        return
-    if st.session_state.get("target_solver_signature") != input_signature:
-        st.info("目标参数已变化，点击“开始倒推”刷新结果。")
-        return
-    st.dataframe(_display_money_df(pd.DataFrame(st.session_state["target_solver_rows"])), use_container_width=True, hide_index=True)
-
-
-def _render_policy_controls() -> PolicyParameters:
-    st.subheader("政策与口径参数")
-    cols = st.columns(4)
-    minimum_capital_multiplier = cols[0].number_input(
-        "最低资本乘数",
-        min_value=0.0,
-        max_value=2.0,
-        value=1.0,
-        step=0.01,
-        help="例如 0.95 可模拟最低资本按 95% 计算。",
-    )
-    market_multiplier = cols[1].number_input(
-        "市场风险乘数", min_value=0.0, max_value=2.0, value=1.0, step=0.01
-    )
-    credit_multiplier = cols[2].number_input(
-        "信用风险乘数", min_value=0.0, max_value=2.0, value=1.0, step=0.01
-    )
-    sync_actual = cols[3].checkbox("认可资产变化同步实际资本", value=False)
-    with st.expander("政策 overlay 摘要", expanded=False):
-        st.dataframe(load_policy_overlays(), use_container_width=True, hide_index=True)
-    return PolicyParameters(
-        minimum_capital_multiplier=float(minimum_capital_multiplier),
-        market_risk_multiplier=float(market_multiplier),
-        credit_risk_multiplier=float(credit_multiplier),
-        sync_actual_capital_with_assets=bool(sync_actual),
-    )
-
-
 def _render_result(result) -> None:
-    st.subheader("测算结果")
+    st.subheader("当前生效情景的测算结果")
     comparison = pd.DataFrame(
         [
             {
@@ -1148,43 +1377,43 @@ def _render_result(result) -> None:
             for key in result.baseline
         ]
     )
-    cols = st.columns(5)
-    cols[0].metric("情景最低资本", _fmt_money(result.scenario["最低资本"]), _fmt_money(result.scenario["最低资本"] - result.baseline["最低资本"]))
-    cols[1].metric("情景实际资本", _fmt_money(result.scenario["实际资本"]), _fmt_money(result.scenario["实际资本"] - result.baseline["实际资本"]))
-    cols[2].metric("情景核心充足率", _fmt_pct(result.scenario["核心偿付能力充足率"]), _fmt_pct_delta(result.scenario["核心偿付能力充足率"] - result.baseline["核心偿付能力充足率"]))
-    cols[3].metric("情景综合充足率", _fmt_pct(result.scenario["综合偿付能力充足率"]), _fmt_pct_delta(result.scenario["综合偿付能力充足率"] - result.baseline["综合偿付能力充足率"]))
-    cols[4].metric("量化最低资本", _fmt_money(result.scenario["量化风险最低资本"]), _fmt_money(result.scenario["量化风险最低资本"] - result.baseline["量化风险最低资本"]))
-    if not result.adjustment_summary.empty:
-        st.caption("本次非零情景调整")
-        st.dataframe(_display_money_df(result.adjustment_summary), use_container_width=True, hide_index=True)
-    st.dataframe(_format_metric_comparison(comparison), use_container_width=True, hide_index=True)
+    cols = _metric_columns("scenario_metrics")
+    for col, name in zip(cols, ["综合偿付能力充足率", "核心偿付能力充足率", "实际资本", "最低资本"]):
+        delta = result.scenario[name] - result.baseline[name]
+        ratio = "充足率" in name
+        value = _fmt_pct(result.scenario[name]) if ratio else f"{result.scenario[name] / 1e8:,.2f}"
+        change = (_fmt_pct_delta(delta) if ratio else _fmt_money_delta(delta)) if abs(delta) > 1e-9 else None
+        label = name.replace("偿付能力", "") if ratio else f"{name}（亿元）"
+        col.metric(label, value, change, delta_color="normal" if ratio else "off")
+    with st.expander("查看全部指标对比"):
+        st.dataframe(_format_metric_comparison(comparison), width="stretch", hide_index=True)
 
 
 def _render_detail_tabs(data, result) -> None:
-    tabs = st.tabs(["情景输入", "瀑布分析", "贡献分析", "因子假设", "暴露变化", "分账户资本", "原始报表"])
+    tabs = st.tabs(["生效调整", "瀑布分析", "贡献分析", "因子假设", "暴露变化", "基准分账户资本", "基准原始报表"])
     with tabs[0]:
         if result.adjustment_summary.empty:
             st.info("当前没有非零情景调整。")
         else:
             st.dataframe(
                 _display_adjustment_summary(data, result.adjustment_summary),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
     with tabs[1]:
         _render_waterfall_analysis(result)
     with tabs[2]:
-        st.dataframe(_display_money_df(result.contribution_summary), use_container_width=True, hide_index=True)
+        st.dataframe(_display_money_df(result.contribution_summary), width="stretch", hide_index=True)
     with tabs[3]:
-        st.dataframe(_display_rate_df(result.risk_rates), use_container_width=True, hide_index=True)
+        st.dataframe(_display_rate_df(result.risk_rates), width="stretch", hide_index=True)
     with tabs[4]:
         st.info("利率风险情景不再把固收资产简单作为正向暴露处理；新增国债、地方政府债等会按资产端利率风险抵减因子降低寿险利率风险最低资本。")
-        st.dataframe(_display_money_df(result.exposure_summary), use_container_width=True, hide_index=True)
+        st.dataframe(_display_money_df(result.exposure_summary), width="stretch", hide_index=True)
     with tabs[5]:
-        st.dataframe(_display_report_money_df(data.account_capital), use_container_width=True, hide_index=True)
+        st.dataframe(_display_report_money_df(data.account_capital), width="stretch", hide_index=True)
     with tabs[6]:
-        st.dataframe(_display_report_money_df(data.s01), use_container_width=True, hide_index=True)
-        st.dataframe(_display_report_money_df(data.s05), use_container_width=True, hide_index=True)
+        st.dataframe(_display_report_money_df(data.s01), width="stretch", hide_index=True)
+        st.dataframe(_display_report_money_df(data.s05), width="stretch", hide_index=True)
 
 
 def _render_waterfall_analysis(result) -> None:
@@ -1197,20 +1426,20 @@ def _render_waterfall_analysis(result) -> None:
     ratio_df = _build_ratio_waterfall(result, metric)
     capital_df = _build_capital_waterfall(result)
     st.subheader("充足率变化拆解")
-    st.altair_chart(_waterfall_chart(ratio_df, "百分点"), use_container_width=True)
-    st.dataframe(_display_waterfall_df(ratio_df, "pct"), use_container_width=True, hide_index=True)
+    st.altair_chart(_waterfall_chart(ratio_df, "百分点"), width="stretch")
+    st.dataframe(_display_waterfall_df(ratio_df, "pct"), width="stretch", hide_index=True)
 
     st.subheader("最低资本变化拆解")
-    st.altair_chart(_waterfall_chart(capital_df, "亿元"), use_container_width=True)
-    st.dataframe(_display_waterfall_df(capital_df, "money"), use_container_width=True, hide_index=True)
+    st.altair_chart(_waterfall_chart(capital_df, "亿元"), width="stretch")
+    st.dataframe(_display_waterfall_df(capital_df, "money"), width="stretch", hide_index=True)
 
     st.subheader("风险子项贡献排名")
     ranking = _risk_contribution_ranking(result.contribution_summary)
     if ranking.empty:
         st.info("当前情景没有风险子项最低资本变化。")
     else:
-        st.altair_chart(_ranking_chart(ranking), use_container_width=True)
-        st.dataframe(_display_money_df(ranking), use_container_width=True, hide_index=True)
+        st.altair_chart(_ranking_chart(ranking), width="stretch")
+        st.dataframe(_display_money_df(ranking), width="stretch", hide_index=True)
 
 
 def _build_ratio_waterfall(result, metric: str) -> pd.DataFrame:
@@ -1289,7 +1518,7 @@ def _waterfall_chart(df: pd.DataFrame, unit_label: str) -> alt.Chart:
                 "方向:N",
                 scale=alt.Scale(
                     domain=["增加", "减少", "合计"],
-                    range=["#d8efe0", "#f4d6d6", "#d9e2f2"],
+                    range=["#3F7C72", "#A65252", "#395B7D"],
                 ),
                 legend=None,
             ),
@@ -1324,8 +1553,8 @@ def _ranking_chart(df: pd.DataFrame) -> alt.Chart:
             x=alt.X("变化亿元:Q", title="亿元"),
             color=alt.condition(
                 alt.datum["变化亿元"] >= 0,
-                alt.value("#d8efe0"),
-                alt.value("#f4d6d6"),
+                alt.value("#3F7C72"),
+                alt.value("#A65252"),
             ),
             tooltip=[
                 alt.Tooltip("风险类型:N"),
@@ -1354,7 +1583,7 @@ def _risk_delta(summary: pd.DataFrame, risk_type: str) -> float:
 def _display_waterfall_df(df: pd.DataFrame, unit: str) -> pd.DataFrame:
     out = df[["项目", "类型", "变化", "标签位置"]].copy()
     if unit == "pct":
-        out["变化"] = out["变化"].map(lambda value: f"{value:+.2f} pct")
+        out["变化"] = out["变化"].map(lambda value: f"{value:+.2f} 个百分点")
         out["标签位置"] = out["标签位置"].map(lambda value: f"{value:.2f}%")
         out = out.rename(columns={"标签位置": "结果"})
     else:
@@ -1369,7 +1598,7 @@ def _format_metric_comparison(df: pd.DataFrame) -> pd.DataFrame:
     ratio_mask = out["指标"].str.contains("充足率")
     for col in ["基准", "情景", "变化"]:
         out[col] = out[col].astype(object)
-        out.loc[ratio_mask, col] = out.loc[ratio_mask, col].map(_fmt_pct)
+        out.loc[ratio_mask, col] = out.loc[ratio_mask, col].map(_fmt_pct_delta if col == "变化" else _fmt_pct)
         out.loc[~ratio_mask, col] = out.loc[~ratio_mask, col].map(_fmt_money)
     return out
 
@@ -1434,7 +1663,7 @@ def _display_rate_df(df: pd.DataFrame) -> pd.DataFrame:
     out = _display_money_df(df)
     for col in df.columns:
         if "因子" in str(col) or str(col) == "单位资本率":
-            out[col] = df[col].map(_fmt_pct)
+            out[col] = df[col].map(lambda value: "" if pd.isna(value) else _fmt_pct(value))
     return out
 
 
@@ -1477,7 +1706,7 @@ def _fmt_pct(value: float) -> str:
 
 
 def _fmt_pct_delta(value: float) -> str:
-    return f"{value * 100:+.2f} pct"
+    return f"{value * 100:+.2f} 个百分点"
 
 
 if __name__ == "__main__":

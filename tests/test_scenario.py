@@ -534,7 +534,12 @@ def test_bond_market_shock_uses_bucket_duration_and_bp_sign(workbook_data):
     assert adjustments[0].duration_bucket == "15-30年"
     assert adjustments[0].mode == "price"
     assert adjustments[0].change_amount < 0
-    assert summary.iloc[0]["估算久期"] == pytest.approx(22.5)
+    raw = workbook_data.mc_detail
+    scoped = raw[(raw["资产类型"] == "国债") & raw["修正久期"].ge(15) & raw["修正久期"].lt(30)]
+    values = scoped["账面价值净价"] + scoped["应收利息"]
+    expected_duration = (values * scoped["修正久期"]).sum() / values.sum()
+    assert summary.iloc[0]["估算久期"] == pytest.approx(expected_duration)
+    assert summary.iloc[0]["估算久期"] != pytest.approx(22.5)
     assert summary.iloc[0]["估算价格变化"] == pytest.approx(adjustments[0].change_amount)
 
 

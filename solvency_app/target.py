@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose
+from math import isclose, isfinite
 
 from .scenario import Adjustment, PolicyParameters, run_scenario
 from .workbook import WorkbookData
@@ -11,6 +11,20 @@ METRIC_CORE = "核心偿付能力充足率"
 METRIC_COMPREHENSIVE = "综合偿付能力充足率"
 ASSET_TYPE_DIMENSION = "资产类型"
 VALUE_COL = "认可价值"
+
+
+def solve_target_level(data, asset_type: str, metric: str, target_ratio: float,
+                       mode: str, duration_bucket: str = "存量平均",
+                       policy: PolicyParameters | None = None, goal: str = "at_least") -> TargetSolveResult:
+    if not isfinite(target_ratio) or target_ratio <= 0 or goal not in ("at_least", "exact"):
+        raise ValueError("目标充足率必须为正数，且目标方式有效")
+    effective = policy or PolicyParameters()
+    baseline_ratio = float(run_scenario(data, [], effective).scenario[metric])
+    if goal == "at_least" and baseline_ratio >= target_ratio:
+        return _result(data, effective, mode, metric, asset_type, duration_bucket,
+                       target_ratio, 0.0, True, "基准已达到目标下限，无需调整。")
+    return solve_target_change(data, asset_type, metric, (target_ratio - baseline_ratio) * 100,
+                               mode, duration_bucket, effective, tolerance_pct_points=0.000001)
 
 
 @dataclass(frozen=True)
