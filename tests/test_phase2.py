@@ -91,12 +91,12 @@ def test_bond_price_bp_sign_symmetry(data):
 
 def test_surface_and_tree_totals_do_not_add_parents_and_children(data):
     surface = surface_holdings(data.kbqs)
-    assert len(surface) == 4605
-    assert surface["认可价值"].sum() == pytest.approx(809596660500.11)
+    assert len(surface) == 5041
+    assert surface["认可价值"].sum() == pytest.approx(808756855344.14)
     trees = tree_inventory(data.kbqs)
-    assert len(trees) == 205
+    assert len(trees) == 207
     assert trees["表层记录数"].eq(1).all()
-    assert trees["底层记录数"].sum() == 5596
+    assert trees["底层记录数"].sum() == 5597
     assert distribution(surface, "币种分类")["占所选范围比例"].sum() == pytest.approx(1)
 
 

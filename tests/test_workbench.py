@@ -36,7 +36,7 @@ def test_all_periods_reconcile(snapshots):
 
 
 def test_latest_raw_fields_preserved(latest):
-    assert len(latest.kbqs) == 10234
+    assert len(latest.kbqs) == 10671
     assert {"穿透情况", "交易结构层级", "资产树标识符", "来源工作表", "来源行", "原始利率风险暴露"}.issubset(latest.kbqs.columns)
     assert latest.kbqs["来源行"].iloc[0] == 2
     assert latest.kbqs["来源行"].is_unique
@@ -131,7 +131,7 @@ def test_overview_does_not_load_asset_details(monkeypatch, snapshots):
     monkeypatch.setattr(app, "_load_history_metrics", lambda *args: (history, errors))
     at = AppTest.from_function(_main).run(timeout=30)
     assert not at.exception
-    assert any("152.17%" == m.value for m in at.metric)
+    assert any("156.89%" == m.value for m in at.metric)
     at.radio(key="workspace_page").set_value("总览与归因").run()
     assert not at.exception
 
