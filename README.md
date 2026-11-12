@@ -1,6 +1,6 @@
 # 偿付能力资产配置情景测算
 
-一个面向保险资金资产配置和偿付能力敏感性分析的 Streamlit 应用。项目从月度偿付能力 Excel 底稿中读取核心监管指标、资产暴露和最低资本明细，支持快速比较历史趋势、构建资产调整情景，并观察对实际资本、最低资本和偿付能力充足率的影响。
+一个面向保险资金资产配置和偿付能力敏感性分析的 Streamlit 应用。项目从已处理的月度 Parquet 数据中读取核心监管指标、资产暴露和最低资本明细，支持快速比较历史趋势、构建资产调整情景，并观察对实际资本、最低资本和偿付能力充足率的影响。
 
 > 该工具用于内部管理测算、组合敏感性分析和汇报材料准备，不替代监管报送系统或完整偿二代复算引擎。
 
@@ -37,7 +37,7 @@
 
 数据校验不会把必要风险暴露的空值自动当成零。当前 2026-02、2026-03 底稿各有 4 条汇率风险暴露缺失，相应情景计算会暂停并提示 Excel 行号；总览与总表勾稽仍可使用，需确认原始口径后再恢复情景计算。
 
-- **月度底稿管理**：自动扫描 `origin stats/` 下的多期 Excel 底稿，按报告月份和底稿时点选择测算口径。
+- **月度底稿管理**：自动扫描 `data/` 下的多期 Parquet 数据，按报告月份和底稿时点选择测算口径。
 - **历史趋势看板**：展示核心/综合充足率和较上一可用月份的变化，分别标注适用的 50%/100% 一般监管底线，不输出整体合规判断。
 - **资产配置情景**：支持已有资产类型的加减仓、价格变化和市场冲击；编辑金额以亿元输入，零持仓建仓暂不支持。
 - **市场冲击模块**：支持股市涨跌、国债和地方政府债按久期 bucket 输入收益率 bp 变化。
@@ -45,20 +45,34 @@
 - **瀑布拆解**：把充足率变化拆解为资本端影响、最低资本端影响和风险子项贡献，便于解释情景结果。
 - **监管口径透明**：页面保留风险因子、暴露变化、分账户资本和原始报表明细，方便追溯。
 
-## 数据输入
+## 数据输入与转换
 
-应用会读取 `origin stats/` 目录下的 `.xlsx` 月度底稿。文件名约定为：
+Streamlit 运行时只读取 `data/` 目录下的 `.parquet` 月度数据。文件名约定为：
 
 ```text
-公司代码_报告月末_底稿时点[版本].xlsx
+公司代码_报告月末_底稿时点[版本].parquet
 ```
 
 示例：
 
 ```text
-1000_20260430_20260512.xlsx
-1000_20251231_20260113v2.xlsx
+1000_20260430_20260512.parquet
+1000_20251231_20260113v2.parquet
 ```
+
+本地原始 Excel 继续保存在 `origin stats/`，但不作为远端或内网运行数据发布。转换工具会完整读取 Excel 的六类逻辑表，生成一个 Parquet 封装文件；未来收到新的 Excel 后执行：
+
+```powershell
+python tools\convert_excel_to_parquet.py --file "origin stats\1000_20260930_20261013.xlsx" --output-dir data
+```
+
+批量转换本地全部 Excel：
+
+```powershell
+python tools\convert_excel_to_parquet.py --source-dir "origin stats" --output-dir data
+```
+
+Parquet 内部保留 `S01`、`S05`、`KBQS_V`、`MC_RESULT`、`CAL_DETAIL` 和 `FLS05ACC` 六类逻辑表。运行端不需要 Excel，也不会从上传文件名之外重新猜测月份。
 
 当前解析依赖的主要 sheet：
 
@@ -131,11 +145,13 @@ PV口径抵减因子 = 资产端利率风险MC / PV基础
 ├── solvency_app/
 │   ├── analysis.py                # 总表归因、勾稽与层级展示
 │   ├── workbench.py               # 情景编辑、校验与回放转换
-│   ├── workbook.py                # Excel 底稿发现、解析和校验
+│   ├── workbook.py                # Excel 转换、Parquet 发现、解析和校验
 │   ├── scenario.py                # 情景测算、资本增量和相关矩阵
 │   ├── target.py                  # 目标倒推求解
 │   └── policies.py                # 政策 overlay 参数
-├── origin stats/                  # 月度偿付能力底稿
+├── origin stats/                  # 本地 Excel 原始底稿，不发布
+├── data/                          # Streamlit 运行用 Parquet 数据
+├── tools/                         # Excel -> Parquet 转换工具
 ├── docs/
 │   ├── calculation_logic.md       # 计算逻辑说明
 │   └── images/                    # README 展示图
@@ -156,6 +172,7 @@ PV口径抵减因子 = 资产端利率风险MC / PV基础
 - Streamlit
 - Pandas
 - OpenPyXL
+- PyArrow
 - Altair
 
 ## 适用场景

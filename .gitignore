@@ -7,3 +7,7 @@ pytest-cache-files-*/
 streamlit*.log
 ~$*.xlsx
 ~$*.xlsm
+
+# Local Excel originals remain available for conversion but are not published.
+origin stats/*.xlsx
+origin stats/*.xlsm

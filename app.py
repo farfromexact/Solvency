@@ -28,7 +28,7 @@ from solvency_app.workbook import (
 
 
 st.set_page_config(page_title="偿付能力分析与情景工作台", layout="wide")
-WORKBOOK_CACHE_VERSION = 5
+WORKBOOK_CACHE_VERSION = 6
 
 
 def _apply_columbia_theme() -> None:
@@ -259,13 +259,13 @@ def main() -> None:
 
     sources = discover_workbook_sources()
     if not sources:
-        st.error("origin stats 目录下没有找到可用的月度 Excel 底稿。")
+        st.error("data 目录下没有找到可用的月度 Parquet 数据。请先把本地 Excel 转换后放入该目录。")
         return
 
     with st.sidebar:
         source = _render_workbook_selector(sources)
         page = st.radio("导航", ["总览与归因", "情景工作台", "资产与风险", "数据与口径"], key="workspace_page")
-        st.caption("原始底稿只读。更换月份或替换同名文件时，会清空已应用的情景。")
+        st.caption("运行数据来自服务器上的 Parquet。更换月份或替换同名文件时，会清空已应用的情景。")
     _sync_selected_workbook_state(source)
     try:
         snapshot = _load_snapshot(source.path, source.modified_time_ns, WORKBOOK_CACHE_VERSION)

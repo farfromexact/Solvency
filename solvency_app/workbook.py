@@ -2,19 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import json
+import os
 from pathlib import Path
 import re
 from typing import BinaryIO
 import math
+import uuid
 
 import pandas as pd
 
 from .calibration import RISK_COLUMNS, build_calibration
 
 
-WORKBOOK_SOURCE_DIR = Path("origin stats")
+WORKBOOK_SOURCE_DIR = Path("data")
+PARQUET_SOURCE_DIR = WORKBOOK_SOURCE_DIR
+EXCEL_SOURCE_DIR = Path("origin stats")
+PARQUET_FORMAT_VERSION = "solvency_workbook_bundle_v1"
+PARQUET_TABLES = ("s01", "s05", "kbqs", "mc_detail", "cal_detail", "account_capital")
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 WORKBOOK_FILENAME_RE = re.compile(
-    r"^(?P<company_code>[^_]+)_(?P<report_date>\d{8})_(?P<timepoint_date>\d{8})(?P<version_suffix>[A-Za-z]\w*)?\.xlsx$",
+    r"^(?P<company_code>[^_]+)_(?P<report_date>\d{8})_(?P<timepoint_date>\d{8})(?P<version_suffix>[A-Za-z]\w*)?\.(?P<extension>xlsx|parquet)$",
     re.IGNORECASE,
 )
 
@@ -82,6 +90,15 @@ class WorkbookSource:
 
 
 @dataclass(frozen=True)
+class UploadedParquetResult:
+    """Result returned after a validated Parquet bundle is installed."""
+
+    source: WorkbookSource
+    replaced_existing: bool
+    size_bytes: int
+
+
+@dataclass(frozen=True)
 class BaselineMetrics:
     admitted_assets: float
     admitted_liabilities: float
@@ -124,25 +141,40 @@ class ReportSnapshot:
 
 
 def load_report_snapshot(source: str | Path | BinaryIO) -> ReportSnapshot:
+    if _source_extension(source) == ".parquet":
+        tables = _read_parquet_tables(source, required=("s01", "s05"))
+        source_name = _source_name(source)
+        s01 = tables["s01"]
+        s05 = tables["s05"]
+        return ReportSnapshot(_extract_metrics(s01), s01, s05, source_name)
+
     with pd.ExcelFile(source, engine="openpyxl") as excel:
         s01 = _read_report_sheet(excel, _resolve_sheet(excel.sheet_names, "S01_"))
         s05 = _read_report_sheet(excel, _resolve_sheet(excel.sheet_names, "S05_"))
     return ReportSnapshot(_extract_metrics(s01), s01, s05, getattr(source, "name", None) or str(source))
 
 
-def discover_workbook_sources(folder: str | Path = WORKBOOK_SOURCE_DIR) -> list[WorkbookSource]:
+def discover_workbook_sources(
+    folder: str | Path = WORKBOOK_SOURCE_DIR,
+    *,
+    include_excel: bool | None = None,
+) -> list[WorkbookSource]:
     source_dir = Path(folder)
     if not source_dir.exists():
         return []
+    if include_excel is None:
+        include_excel = source_dir.resolve() != Path(WORKBOOK_SOURCE_DIR).resolve()
 
     sources: list[WorkbookSource] = []
-    for path in source_dir.glob("*.xlsx"):
-        if path.name.startswith("~$"):
-            continue
-        try:
-            sources.append(parse_workbook_source(path))
-        except WorkbookValidationError:
-            continue
+    patterns = ["*.parquet"] + (["*.xlsx"] if include_excel else [])
+    for pattern in patterns:
+        for path in source_dir.glob(pattern):
+            if path.name.startswith("~$"):
+                continue
+            try:
+                sources.append(parse_workbook_source(path))
+            except WorkbookValidationError:
+                continue
     return sorted(sources, key=lambda source: source.sort_key)
 
 
@@ -184,27 +216,73 @@ def find_workbook_source(
 
 
 def load_workbook_data(source: str | Path | BinaryIO) -> WorkbookData:
+    if _source_extension(source) == ".parquet":
+        return _load_workbook_from_parquet(source)
+
     with pd.ExcelFile(source, engine="openpyxl") as excel:
         return _load_workbook_from_excel(excel, source)
 
 
 def _load_workbook_from_excel(excel: pd.ExcelFile, source) -> WorkbookData:
-    sheets = _resolve_sheets(excel.sheet_names)
+    tables = _read_excel_tables(excel, strict_exposures=True)
+    return _build_workbook_data(
+        **tables,
+        source_name=_source_name(source),
+    )
 
-    s01 = _read_report_sheet(excel, sheets["s01"])
-    s05 = _read_report_sheet(excel, sheets["s05"])
-    kbqs = _read_kbqs_sheet(excel, sheets["kbqs"])
-    kbqs["来源文件"] = getattr(source, "name", None) or str(source)
-    mc_result = _read_mc_result_sheet(excel, sheets["mc_result"])
+
+def _load_workbook_from_parquet(source: str | Path | BinaryIO) -> WorkbookData:
+    tables = _read_parquet_tables(source, required=PARQUET_TABLES)
+    return _build_workbook_data(
+        s01=tables["s01"],
+        s05=tables["s05"],
+        kbqs=tables["kbqs"],
+        mc_result=tables["mc_detail"],
+        cal_detail=tables["cal_detail"],
+        account_capital=tables["account_capital"],
+        source_name=_source_name(source),
+    )
+
+
+def _read_excel_tables(
+    excel: pd.ExcelFile,
+    *,
+    strict_exposures: bool,
+) -> dict[str, pd.DataFrame]:
+    sheets = _resolve_sheets(excel.sheet_names)
+    return {
+        "s01": _read_report_sheet(excel, sheets["s01"]),
+        "s05": _read_report_sheet(excel, sheets["s05"]),
+        "kbqs": _read_kbqs_sheet(
+            excel,
+            sheets["kbqs"],
+            strict_exposures=strict_exposures,
+        ),
+        "mc_result": _read_mc_result_sheet(excel, sheets["mc_result"]),
+        "cal_detail": _read_cal_detail_sheet(excel, sheets["cal_detail"]),
+        "account_capital": _read_account_capital_sheet(excel, sheets["fls05acc"]),
+    }
+
+
+def _build_workbook_data(
+    *,
+    s01: pd.DataFrame,
+    s05: pd.DataFrame,
+    kbqs: pd.DataFrame,
+    mc_result: pd.DataFrame,
+    cal_detail: pd.DataFrame,
+    account_capital: pd.DataFrame,
+    source_name: str,
+) -> WorkbookData:
+    kbqs = kbqs.copy()
+    kbqs["来源文件"] = source_name
+    _validate_kbqs_exposures(kbqs)
     interest_factor_table = _build_interest_factor_table(mc_result)
     if interest_factor_table.empty:
         raise WorkbookValidationError("MC_RESULT_资产端利率风险明细表无法反推利率风险抵减因子")
     kbqs = _enrich_interest_risk_from_mc_result(kbqs, mc_result)
-    cal_detail = _read_cal_detail_sheet(excel, sheets["cal_detail"])
     spread_factor_table = _build_spread_factor_table(cal_detail)
-    account_capital = _read_account_capital_sheet(excel, sheets["fls05acc"])
     metrics = _extract_metrics(s01)
-    source_name = getattr(source, "name", None) or str(source)
     risk_factor_table, calibration_checks = build_calibration(cal_detail, kbqs, s05)
 
     return WorkbookData(
@@ -223,11 +301,207 @@ def _load_workbook_from_excel(excel: pd.ExcelFile, source) -> WorkbookData:
     )
 
 
+def _validate_kbqs_exposures(kbqs: pd.DataFrame) -> None:
+    sheet_name = str(kbqs["来源工作表"].iloc[0]) if "来源工作表" in kbqs and not kbqs.empty else "KBQS_V_"
+    for col in EXPOSURE_COLUMNS:
+        if col not in kbqs:
+            raise WorkbookValidationError(f"{sheet_name} 缺少必要字段: {col}")
+        numeric = pd.to_numeric(kbqs[col], errors="coerce")
+        invalid = numeric.isna() | ~numeric.map(math.isfinite)
+        if invalid.any():
+            if "来源行" in kbqs:
+                rows = ", ".join(str(value) for value in kbqs.loc[invalid, "来源行"].head(8).tolist())
+            else:
+                rows = ", ".join(str(index + 2) for index in kbqs.index[invalid][:8])
+            raise WorkbookValidationError(
+                f"{sheet_name} 的 {col} 有 {int(invalid.sum())} 条空值或无效数值，"
+                f"Excel 行号 {rows}；未自动补零，请核查原始底稿"
+            )
+        kbqs[col] = numeric
+
+
 def load_baseline_metrics(source: str | Path | BinaryIO) -> BaselineMetrics:
+    if _source_extension(source) == ".parquet":
+        s01 = _read_parquet_tables(source, required=("s01",))["s01"]
+        return _extract_metrics(s01)
+
     with pd.ExcelFile(source, engine="openpyxl") as excel:
         sheet_name = _resolve_sheet(excel.sheet_names, SHEET_PREFIXES["s01"])
         s01 = _read_report_sheet(excel, sheet_name)
     return _extract_metrics(s01)
+
+
+def save_workbook_as_parquet(
+    source: str | Path,
+    destination: str | Path | None = None,
+) -> Path:
+    """Parse one local Excel workbook and atomically write a Parquet bundle."""
+
+    source_path = Path(source)
+    if source_path.suffix.lower() != ".xlsx":
+        raise WorkbookValidationError("Excel 转换输入必须是 .xlsx 文件")
+    if not source_path.exists():
+        raise WorkbookValidationError(f"找不到 Excel 输入文件: {source_path}")
+
+    destination_path = Path(destination) if destination is not None else PARQUET_SOURCE_DIR / f"{source_path.stem}.parquet"
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = destination_path.parent / f".{destination_path.stem}.{uuid.uuid4().hex}.parquet"
+    try:
+        with pd.ExcelFile(source_path, engine="openpyxl") as excel:
+            tables = _read_excel_tables(excel, strict_exposures=False)
+        _write_parquet_bundle(tables, source_path.name, temporary_path)
+        os.replace(temporary_path, destination_path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+    return destination_path
+
+
+def install_uploaded_parquet(
+    filename: str,
+    content: bytes,
+    folder: str | Path = WORKBOOK_SOURCE_DIR,
+) -> UploadedParquetResult:
+    """Validate and atomically install one processed Parquet bundle."""
+
+    if not isinstance(filename, str) or not filename.strip():
+        raise WorkbookValidationError("上传文件名不能为空")
+    if filename != filename.strip():
+        raise WorkbookValidationError("上传文件名不能以空格开头或结尾")
+    if filename.startswith("~$") or filename.startswith("."):
+        raise WorkbookValidationError("不能上传临时或隐藏文件")
+    if "/" in filename or "\\" in filename or Path(filename).name != filename:
+        raise WorkbookValidationError("上传文件名不能包含目录路径")
+    if not filename.lower().endswith(".parquet"):
+        raise WorkbookValidationError("只支持已处理的 .parquet 月度数据")
+
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        raise WorkbookValidationError("上传内容不是有效的二进制文件")
+    payload = bytes(content)
+    size_bytes = len(payload)
+    if size_bytes == 0:
+        raise WorkbookValidationError("上传文件为空")
+    if size_bytes > MAX_UPLOAD_BYTES:
+        raise WorkbookValidationError(
+            f"上传文件不能超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+        )
+
+    source_dir = Path(folder)
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise WorkbookValidationError(f"Parquet 数据目录不存在或不可用: {source_dir}")
+    source_dir = source_dir.resolve()
+    target_path = (source_dir / filename).resolve()
+    if target_path.parent != source_dir:
+        raise WorkbookValidationError("上传文件名不能指向数据目录之外")
+    parse_workbook_source(target_path)
+
+    replaced_existing = target_path.exists()
+    temporary_path = source_dir / f".{target_path.stem}.{uuid.uuid4().hex}.parquet"
+    try:
+        with temporary_path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        _read_parquet_tables(temporary_path, required=PARQUET_TABLES)
+        load_workbook_data(temporary_path)
+        os.replace(temporary_path, target_path)
+        installed_source = parse_workbook_source(target_path)
+        return UploadedParquetResult(installed_source, replaced_existing, size_bytes)
+    except WorkbookValidationError:
+        raise
+    except Exception as exc:
+        raise WorkbookValidationError(f"Parquet 数据校验失败: {exc}") from exc
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _source_extension(source: str | Path | BinaryIO) -> str:
+    if isinstance(source, (str, Path)):
+        return Path(source).suffix.lower()
+    name = getattr(source, "name", None)
+    return Path(str(name)).suffix.lower() if name else ""
+
+
+def _source_name(source: str | Path | BinaryIO) -> str:
+    return str(getattr(source, "name", None) or source)
+
+
+def _write_parquet_bundle(
+    tables: dict[str, pd.DataFrame],
+    source_filename: str,
+    destination: str | Path,
+) -> None:
+    rows = []
+    for table_name in PARQUET_TABLES:
+        frame = tables[table_name if table_name != "mc_detail" else "mc_result"]
+        rows.append(
+            {
+                "format_version": PARQUET_FORMAT_VERSION,
+                "source_filename": source_filename,
+                "table_name": table_name,
+                "payload_json": frame.to_json(
+                    orient="split",
+                    date_format="iso",
+                    force_ascii=False,
+                    default_handler=str,
+                ),
+            }
+        )
+    pd.DataFrame(rows).to_parquet(
+        destination,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+
+def _read_parquet_tables(
+    source: str | Path | BinaryIO,
+    *,
+    required: tuple[str, ...],
+) -> dict[str, pd.DataFrame]:
+    try:
+        bundle = pd.read_parquet(source, engine="pyarrow")
+    except Exception as exc:
+        raise WorkbookValidationError("文件不是有效的 Parquet 数据包") from exc
+
+    required_columns = {"format_version", "source_filename", "table_name", "payload_json"}
+    missing_columns = required_columns.difference(bundle.columns)
+    if missing_columns:
+        raise WorkbookValidationError(
+            "Parquet 数据包缺少必要字段: " + ", ".join(sorted(missing_columns))
+        )
+    versions = {str(value) for value in bundle["format_version"].dropna().tolist()}
+    if versions != {PARQUET_FORMAT_VERSION}:
+        raise WorkbookValidationError("Parquet 数据包版本不受当前应用支持")
+
+    tables: dict[str, pd.DataFrame] = {}
+    for row in bundle.itertuples(index=False):
+        table_name = str(row.table_name)
+        if table_name in tables:
+            raise WorkbookValidationError(f"Parquet 数据包包含重复逻辑表: {table_name}")
+        try:
+            payload = json.loads(str(row.payload_json))
+            tables[table_name] = pd.DataFrame(
+                payload["data"],
+                columns=payload["columns"],
+                index=payload.get("index"),
+            )
+        except Exception as exc:
+            raise WorkbookValidationError(f"Parquet 逻辑表 {table_name} 无法恢复") from exc
+
+    missing_tables = set(required).difference(tables)
+    if missing_tables:
+        raise WorkbookValidationError(
+            "Parquet 数据包缺少必要逻辑表: " + ", ".join(sorted(missing_tables))
+        )
+    return tables
 
 
 def _parse_yyyymmdd(raw: str, source_name: str) -> date:
@@ -282,7 +556,12 @@ def _read_report_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _read_kbqs_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+def _read_kbqs_sheet(
+    excel: pd.ExcelFile,
+    sheet_name: str,
+    *,
+    strict_exposures: bool = True,
+) -> pd.DataFrame:
     df = pd.read_excel(excel, sheet_name=sheet_name, header=0)
     required = {"账户", "资产类型", *EXPOSURE_COLUMNS}
     missing = required.difference(df.columns)
@@ -301,7 +580,7 @@ def _read_kbqs_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     for col in EXPOSURE_COLUMNS:
         numeric = pd.to_numeric(df[col], errors="coerce")
         invalid = numeric.isna() | ~numeric.map(math.isfinite)
-        if invalid.any():
+        if invalid.any() and strict_exposures:
             rows = ", ".join(str(index + 2) for index in df.index[invalid][:8])
             raise WorkbookValidationError(
                 f"{sheet_name} 的 {col} 有 {int(invalid.sum())} 条空值或无效数值，"

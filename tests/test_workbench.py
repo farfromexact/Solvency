@@ -17,7 +17,8 @@ from solvency_app.workbook import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = discover_workbook_sources(ROOT / "origin stats")
+SOURCES = discover_workbook_sources(ROOT / "data", include_excel=False)
+EXCEL_SOURCES = discover_workbook_sources(ROOT / "origin stats", include_excel=True)
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +49,7 @@ def test_latest_raw_fields_preserved(latest):
 
 @pytest.mark.parametrize("month", ["2026-02", "2026-03"])
 def test_historical_missing_exposure_is_not_silently_zeroed(month):
-    source = next(source for source in SOURCES if source.report_month == month)
+    source = next(source for source in EXCEL_SOURCES if source.report_month == month)
     with pd.ExcelFile(source.path) as excel:
         sheet = next(name for name in excel.sheet_names if name.startswith("KBQS_V_"))
         with pytest.raises(WorkbookValidationError, match="汇率风险暴露 有 4 条.*Excel 行号"):

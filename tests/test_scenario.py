@@ -20,13 +20,15 @@ from solvency_app.workbook import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKBOOK_DIR = ROOT / "origin stats"
-WORKBOOK = WORKBOOK_DIR / "1000_20260430_20260512.xlsx"
+EXCEL_DIR = ROOT / "origin stats"
+PARQUET_DIR = ROOT / "data"
+WORKBOOK = EXCEL_DIR / "1000_20260430_20260512.xlsx"
+PARQUET_WORKBOOK = PARQUET_DIR / "1000_20260430_20260512.parquet"
 
 
 @pytest.fixture(scope="module")
 def workbook_data():
-    return load_workbook_data(WORKBOOK)
+    return load_workbook_data(PARQUET_WORKBOOK)
 
 
 def test_parse_workbook_source_regular_filename():
@@ -39,7 +41,7 @@ def test_parse_workbook_source_regular_filename():
 
 
 def test_parse_workbook_source_version_suffix():
-    source = parse_workbook_source(WORKBOOK_DIR / "1000_20251231_20260113v2.xlsx")
+    source = parse_workbook_source(EXCEL_DIR / "1000_20251231_20260113v2.xlsx")
     assert source.report_month == "2025-12"
     assert source.report_date_label == "2025-12-31"
     assert source.timepoint_label == "2026-01-13 v2"
@@ -47,24 +49,24 @@ def test_parse_workbook_source_version_suffix():
 
 
 def test_discover_workbook_sources_sorts_and_defaults_to_latest():
-    sources = discover_workbook_sources(WORKBOOK_DIR)
+    sources = discover_workbook_sources(PARQUET_DIR, include_excel=False)
     assert [source.report_month for source in sources] == ["2025-12", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]
 
     latest = latest_workbook_source(sources)
     assert latest is not None
     assert latest.report_month == "2026-09"
     assert latest.timepoint_label == "2026-10-13"
-    assert latest.path.name == "1000_20260930_20261013.xlsx"
+    assert latest.path.name == "1000_20260930_20261013.parquet"
 
 
 def test_find_workbook_source_uses_selected_month_and_timepoint():
-    sources = discover_workbook_sources(WORKBOOK_DIR)
+    sources = discover_workbook_sources(PARQUET_DIR, include_excel=False)
     selected = find_workbook_source(sources, "2026-02", "2026-03-12")
-    assert selected.path.name == "1000_20260228_20260312.xlsx"
+    assert selected.path.name == "1000_20260228_20260312.parquet"
 
 
 def test_lightweight_baseline_metrics_match_full_parse(workbook_data):
-    metrics = load_baseline_metrics(WORKBOOK)
+    metrics = load_baseline_metrics(PARQUET_WORKBOOK)
     assert metrics.admitted_assets == pytest.approx(workbook_data.metrics.admitted_assets)
     assert metrics.minimum_capital == pytest.approx(workbook_data.metrics.minimum_capital)
     assert metrics.comprehensive_solvency_ratio == pytest.approx(workbook_data.metrics.comprehensive_solvency_ratio)

@@ -1,5 +1,6 @@
 altair
 pandas
 openpyxl
+pyarrow
 streamlit
 pytest
