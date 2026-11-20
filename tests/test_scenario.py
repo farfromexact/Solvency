@@ -50,13 +50,13 @@ def test_parse_workbook_source_version_suffix():
 
 def test_discover_workbook_sources_sorts_and_defaults_to_latest():
     sources = discover_workbook_sources(PARQUET_DIR, include_excel=False)
-    assert [source.report_month for source in sources] == ["2025-12", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]
+    assert [source.report_month for source in sources] == ["2025-12", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10"]
 
     latest = latest_workbook_source(sources)
     assert latest is not None
-    assert latest.report_month == "2026-09"
-    assert latest.timepoint_label == "2026-10-13"
-    assert latest.path.name == "1000_20260930_20261013.parquet"
+    assert latest.report_month == "2026-10"
+    assert latest.timepoint_label == "2026-11-19"
+    assert latest.path.name == "1000_20261031_20261119.parquet"
 
 
 def test_find_workbook_source_uses_selected_month_and_timepoint():

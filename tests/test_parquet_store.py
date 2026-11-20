@@ -12,16 +12,16 @@ from solvency_app.workbook import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCEL_LATEST = ROOT / "origin stats" / "1000_20260930_20261013.xlsx"
-PARQUET_LATEST = ROOT / "data" / "1000_20260930_20261013.parquet"
+EXCEL_LATEST = ROOT / "origin stats" / "1000_20261031_20261119.xlsx"
+PARQUET_LATEST = ROOT / "data" / "1000_20261031_20261119.parquet"
 UPLOAD_TEST_ROOT = ROOT / "tests" / ".parquet_upload_test_workspace"
 
 
 def test_default_runtime_source_is_parquet_only():
     sources = discover_workbook_sources()
-    assert len(sources) == 9
+    assert len(sources) == 10
     assert all(source.path.suffix.lower() == ".parquet" for source in sources)
-    assert sources[-1].report_month == "2026-09"
+    assert sources[-1].report_month == "2026-10"
 
 
 def test_latest_parquet_matches_excel_calculation_inputs():
@@ -31,7 +31,7 @@ def test_latest_parquet_matches_excel_calculation_inputs():
     assert parquet.metrics.actual_capital == pytest.approx(excel.metrics.actual_capital)
     assert parquet.metrics.minimum_capital == pytest.approx(excel.metrics.minimum_capital)
     assert parquet.metrics.comprehensive_solvency_ratio == pytest.approx(excel.metrics.comprehensive_solvency_ratio)
-    assert len(parquet.kbqs) == len(excel.kbqs) == 10827
+    assert len(parquet.kbqs) == len(excel.kbqs) == 10929
     assert parquet.kbqs["认可价值"].sum() == pytest.approx(excel.kbqs["认可价值"].sum())
 
 
@@ -43,7 +43,7 @@ def test_parquet_upload_validates_and_replaces_atomically():
         payload = PARQUET_LATEST.read_bytes()
         result = install_uploaded_parquet(PARQUET_LATEST.name, payload, target_dir)
 
-        assert result.source.report_month == "2026-09"
+        assert result.source.report_month == "2026-10"
         assert result.replaced_existing is False
         assert result.source.path.stat().st_size == len(payload)
 
